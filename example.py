@@ -14,7 +14,7 @@ if os.environ.get("HTTPS_PROXY"):
     loader_kwargs["proxy"] = {"server": os.environ["HTTPS_PROXY"]}
 
 config = {
-    "llm": {"model": "openai/gpt-4o-mini", "api_key": os.environ["OPENAI_API_KEY"]},
+    "llm": {"model": "google_genai/gemini-flash-latest", "api_key": os.environ["GOOGLE_API_KEY"]},
     "loader_kwargs": loader_kwargs,
     "headless": True,
 }
