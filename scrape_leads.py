@@ -109,9 +109,15 @@ def extract(bundle, llm_config):
             time.sleep(wait)
 
 
+def clean(value):
+    """Strip a field and drop placeholders like "NA" that the LLM uses for missing data."""
+    value = (value or "").strip()
+    return "" if value.lower() in ("na", "n/a", "none", "null", "unknown", "-") else value
+
+
 def verified(value, source):
     """Keep an email/URL only if it really appears on the page (guards against made-up data)."""
-    value = (value or "").strip()
+    value = clean(value)
     if not value:
         return ""
     v = value.lower().removeprefix("mailto:").rstrip("/")
@@ -176,17 +182,18 @@ def main():
 
                 source_page = pages[1][0] if len(pages) > 1 else site
                 general = verified(info.get("general_email", ""), bundle)
+                sectors = clean(info.get("focus_sectors")) or firm["sectors_hint"]
                 people = info.get("people") or []
                 for person in people:
-                    if not person.get("name") or person["name"].lower() not in bundle.lower():
+                    if not clean(person.get("name")) or person["name"].lower() not in bundle.lower():
                         continue
                     append_row(args.out, LEAD_FIELDS, {
                         "region": firm["region"], "country": firm["country"], "firm": name,
                         "firm_type": firm["type"], "stage": firm["stage"], "website": site,
-                        "name": person["name"].strip(), "role": person.get("role", "").strip(),
+                        "name": person["name"].strip(), "role": clean(person.get("role")),
                         "email": verified(person.get("email"), bundle),
                         "linkedin": verified(person.get("linkedin"), bundle),
-                        "focus_sectors": info.get("focus_sectors") or firm["sectors_hint"],
+                        "focus_sectors": sectors,
                         "general_email": general, "source_page": source_page,
                         "scraped_on": date.today().isoformat(),
                     })
@@ -196,7 +203,7 @@ def main():
                     append_row(args.out, LEAD_FIELDS, {
                         "region": firm["region"], "country": firm["country"], "firm": name,
                         "firm_type": firm["type"], "stage": firm["stage"], "website": site,
-                        "focus_sectors": info.get("focus_sectors") or firm["sectors_hint"],
+                        "focus_sectors": sectors,
                         "general_email": general, "source_page": source_page,
                         "scraped_on": date.today().isoformat(),
                     })
