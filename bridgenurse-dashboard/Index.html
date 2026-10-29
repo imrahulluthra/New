@@ -54,7 +54,8 @@
   // calculations on top of it, and named drawings redrawn whenever data, filters or width change.
   (function () {
     const loaders = {}, calcs = {}, draws = {}, listeners = [];
-    const ds = { responses: { status: 'loading', rows: [], columns: [], message: '', refreshing: false } };
+    const fresh = () => ({ status: 'loading', rows: [], columns: [], message: '', refreshing: false });
+    const ds = { responses: fresh(), waitlist: fresh(), cleaning: fresh() };
     let params = {}, version = 0, cache = {}, scheduled = false;
     const css = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 
@@ -114,20 +115,25 @@
 
     const stamp = () => document.querySelectorAll('.host-updated').forEach((s) => { s.textContent = ds.responses.updated ? 'Updated ' + new Date(ds.responses.updated).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : 'Loading…'; });
     function load() {
-      const d = ds.responses;
-      if (d.status === 'ok') d.refreshing = true;
+      const all = Object.values(ds);
+      all.forEach((d) => { if (d.status === 'ok') d.refreshing = true; });
       document.querySelectorAll('.host-refresh').forEach((b) => { b.disabled = true; });
-      const done = () => { document.querySelectorAll('.host-refresh').forEach((b) => { b.disabled = false; }); stamp(); version++; cache = {}; schedule(); };
+      const done = () => { all.forEach((d) => { d.refreshing = false; }); document.querySelectorAll('.host-refresh').forEach((b) => { b.disabled = false; }); stamp(); version++; cache = {}; schedule(); };
+      const put = (d, fn) => {
+        try { const out = fn(); d.rows = out.rows || out; d.columns = out.columns || []; d.status = 'ok'; d.message = ''; }
+        catch (e) { d.status = 'error'; d.message = String(e); console.error(e); }
+      };
       google.script.run
-        .withSuccessHandler((answer) => {
-          try {
-            const out = loaders.responses.fn({ answer });
-            d.rows = out.rows || out; d.columns = out.columns || []; d.status = 'ok'; d.message = ''; d.updated = (answer && answer.updated) || new Date().toISOString();
-          } catch (e) { d.status = 'error'; d.message = String(e); }
-          d.refreshing = false; done();
+        .withSuccessHandler((res) => {
+          res = res || {};
+          put(ds.responses, () => loaders.responses.fn({ answer: res.survey }));
+          put(ds.waitlist, () => loaders.waitlist.fn({ answer: res.waitlist }));
+          put(ds.cleaning, () => ({ rows: [res.cleaning || {}], columns: Object.keys(res.cleaning || {}) }));
+          ds.responses.updated = res.updated || new Date().toISOString();
+          done();
         })
-        .withFailureHandler((err) => { if (d.status !== 'ok') d.status = 'error'; d.message = String(err && err.message || err); d.refreshing = false; done(); })
-        .getSurveyValues();
+        .withFailureHandler((err) => { all.forEach((d) => { if (d.status !== 'ok') d.status = 'error'; d.message = String(err && err.message || err); }); done(); })
+        .getDashboardData();
     }
 
     let w = window.innerWidth;
@@ -221,6 +227,13 @@
   .bn-dots i { width: 9px; height: 9px; border-radius: 50%; background: var(--color-border-line); display: inline-block; }
   .bn-tags { display: flex; flex-wrap: wrap; gap: 4px; }
   .bn-tags span { font-size: var(--cds-font-size-caption); border: 1px solid var(--color-border-line); border-radius: 999px; padding: 1px 8px; }
+  .bn-quality { margin-top: var(--cds-gap-xs) !important; font-size: var(--cds-font-size-caption) !important; }
+  .bn-status { display: inline-block; font-size: var(--cds-font-size-caption); padding: 1px 8px; border-radius: 999px; background: var(--color-bg); border: 1px solid var(--color-border-line); white-space: nowrap; }
+  .bn-status.s-Not-contacted { color: var(--color-fg-muted); }
+  .bn-status.s-Called, .bn-status.s-Interested { color: var(--color-warn); border-color: currentColor; }
+  .bn-status.s-Documents, .bn-status.s-Language-class { color: var(--color-ok); border-color: currentColor; }
+  .bn-status.s-Not-interested { color: var(--color-bad); border-color: currentColor; }
+  .bn-table.compact tbody tr { cursor: default; }
   @media (max-width: 44rem) { .bn-table .hide-narrow { display: none; } }
   .bn-alert { display: grid; gap: 4px; padding: var(--cds-pad-md) var(--cds-pad-lg); border: 1px solid var(--color-bad); border-radius: var(--cds-radius); background: var(--color-panel); font-size: var(--cds-font-size-body); }
   .bn-alert span { color: var(--color-fg-muted); }
@@ -236,7 +249,8 @@
 <div class="bn">
   <header class="bn-head" id="overview">
     <h1>BridgeNurse nurse survey</h1>
-    <p><b data-draw="kpi" data-source="kpis" data-field="responses" data-row="0" data-fmt="int">—</b> nurses have filled the form. Their average intent score is <b data-draw="kpi" data-source="kpis" data-field="avg_score" data-row="0" data-fmt="score">—</b> out of 100, and <b data-draw="kpi" data-source="kpis" data-field="high_share" data-row="0" data-fmt="pct">—</b> are high-intent candidates.</p>
+    <p><b data-draw="kpi" data-source="kpis" data-field="responses" data-row="0" data-fmt="int">—</b> unique nurses have filled the form. Their average intent score is <b data-draw="kpi" data-source="kpis" data-field="avg_score" data-row="0" data-fmt="score">—</b> out of 100, and <b data-draw="kpi" data-source="kpis" data-field="high_share" data-row="0" data-fmt="pct">—</b> are high-intent candidates.</p>
+    <p class="bn-quality bn-needs-clean" id="data-quality">Each nurse is counted once. Test entries left out: <b data-draw="kpi" data-source="cleaning" data-field="survey_test" data-row="0" data-fmt="int">—</b>. Repeat submissions merged: <b data-draw="kpi" data-source="cleaning" data-field="survey_repeats" data-row="0" data-fmt="int">—</b>.</p>
   </header>
 
   <div class="bn-alert" id="data-access" hidden>
@@ -247,6 +261,8 @@
   <nav class="bn-nav" aria-label="Sections">
     <a href="#intent">Overall intent</a>
     <a href="#candidates">Candidates</a>
+    <a href="#followup">Follow-up</a>
+    <a href="#waitlist" class="bn-needs-wl">Website waitlist</a>
     <a href="#pipeline">Pipeline</a>
     <a href="#motivations">Motivations</a>
     <a href="#profile">Profile</a>
@@ -259,6 +275,8 @@
     <div class="bn-tile"><div class="lbl">Likely to apply</div><div class="val" data-draw="kpi" data-source="kpis" data-field="likely_apply_share" data-row="0" data-fmt="pct">—</div><div class="sub">Rated 4 or 5 out of 5</div></div>
     <div class="bn-tile"><div class="lbl">Will learn a language</div><div class="val" data-draw="kpi" data-source="kpis" data-field="language_yes_share" data-row="0" data-fmt="pct">—</div><div class="sub">If the job needs it</div></div>
     <div class="bn-tile"><div class="lbl">Came by referral</div><div class="val" data-draw="kpi" data-source="kpis" data-field="referral_share" data-row="0" data-fmt="pct">—</div><div class="sub">Gave a referral code</div></div>
+    <div class="bn-tile bn-needs-wl"><div class="lbl">Website sign-ups</div><div class="val" data-draw="kpi" data-source="wl_kpis" data-field="total" data-row="0" data-fmt="int">—</div><div class="sub">Waitlist form on the website</div></div>
+    <div class="bn-tile bn-needs-clean"><div class="lbl">Unique people overall</div><div class="val" data-draw="kpi" data-source="cleaning" data-field="unique_people" data-row="0" data-fmt="int">—</div><div class="sub">Survey and website, counted once</div></div>
   </div>
 
   <section class="bn-section" id="intent">
@@ -329,6 +347,7 @@
             <th data-field="name" class="bn-sort" data-sort="name">Candidate</th>
             <th data-field="score" class="bn-sort" data-sort="score">Intent score</th>
             <th data-field="tier" class="bn-sort" data-sort="score">Intent</th>
+            <th data-field="status" class="bn-sort" data-sort="status_rank">Status</th>
             <th data-field="submitted_day" class="bn-sort hide-narrow" data-sort="submitted">Date</th>
             <th data-field="city" class="bn-sort" data-sort="city">City</th>
             <th data-field="qualification" class="bn-sort hide-narrow" data-sort="qualification">Qualification</th>
@@ -347,6 +366,48 @@
     </section>
   </section>
 
+  <section class="bn-section" id="followup">
+    <h2>Follow-up pipeline</h2>
+    <p class="lede">Where each nurse is in your follow-up, from the Status column in the sheet. A blank status counts as Not contacted. Change a status in the sheet, then tap Refresh here.</p>
+    <div class="bn-tiles">
+      <div class="bn-tile"><div class="lbl">High intent, not contacted</div><div class="val" data-draw="kpi" data-source="kpis" data-field="high_not_contacted" data-row="0" data-fmt="int">—</div><div class="sub">Call these first</div></div>
+      <div class="bn-tile"><div class="lbl">Contacted</div><div class="val" data-draw="kpi" data-source="kpis" data-field="contacted" data-row="0" data-fmt="int">—</div><div class="sub">Any status past Not contacted</div></div>
+      <div class="bn-tile"><div class="lbl">Interested or further</div><div class="val" data-draw="kpi" data-source="kpis" data-field="interested_plus" data-row="0" data-fmt="int">—</div><div class="sub">Interested, Documents or Language class</div></div>
+      <div class="bn-tile"><div class="lbl">In language class</div><div class="val" data-draw="kpi" data-source="kpis" data-field="in_class" data-row="0" data-fmt="int">—</div><div class="sub">Furthest stage</div></div>
+    </div>
+    <div class="bn-grid">
+      <section class="bn-card" id="status-all">
+        <h3>Status of all nurses</h3>
+        <p class="note">Count and share at each stage. Click to list them.</p>
+        <div class="bn-chart" data-draw="bars" data-source="status_all" data-label="status" data-fmt="count" data-filter="status">—</div>
+      </section>
+      <section class="bn-card" id="status-high">
+        <h3>Status of high-intent nurses</h3>
+        <p class="note">Only nurses scoring 75 or more.</p>
+        <div class="bn-chart" data-draw="bars" data-source="status_high" data-label="status" data-fmt="count" data-filter="status">—</div>
+      </section>
+    </div>
+    <section class="bn-card" id="call-list">
+      <h3>Call list: high intent, not yet contacted</h3>
+      <p class="note">Highest intent first. Phone numbers stay private in the sheet: find the nurse by the row number shown here.</p>
+      <div class="bn-tablewrap">
+        <table class="bn-table compact" data-source="candidates" data-row-key="resp">
+          <thead><tr>
+            <th data-field="sheet_row" class="num">Sheet row</th>
+            <th data-field="name">Candidate</th>
+            <th data-field="score" class="num">Intent score</th>
+            <th data-field="city">City</th>
+            <th data-field="workplace" class="hide-narrow">Workplace</th>
+            <th data-field="experience" class="hide-narrow">Experience</th>
+            <th data-field="apply_likelihood" class="num">Apply</th>
+            <th data-field="submitted_day" class="hide-narrow">Date</th>
+          </tr></thead>
+          <tbody data-draw="calllist" data-source="candidates"></tbody>
+        </table>
+      </div>
+    </section>
+  </section>
+
   <section class="bn-section" id="pipeline">
     <h2>Pipeline</h2>
     <div class="bn-grid">
@@ -359,6 +420,41 @@
         <h3>Responses per day</h3>
         <p class="note">Bars count each day's responses. The line is the running total.</p>
         <div class="bn-chart" data-draw="daily" data-source="per_day" style="min-height: 13rem"></div>
+      </section>
+    </div>
+  </section>
+
+  <section class="bn-section bn-needs-wl" id="waitlist">
+    <h2>Website waitlist</h2>
+    <p class="lede">Sign-ups from the waitlist form on the BridgeNurse website (the Website submissions tab), with test entries and repeats left out.</p>
+    <div class="bn-tiles">
+      <div class="bn-tile"><div class="lbl">Total sign-ups</div><div class="val" data-draw="kpi" data-source="wl_kpis" data-field="total" data-row="0" data-fmt="int">—</div><div class="sub">All time</div></div>
+      <div class="bn-tile"><div class="lbl">Last 7 days</div><div class="val" data-draw="kpi" data-source="wl_kpis" data-field="last7" data-row="0" data-fmt="int">—</div><div class="sub">Including today</div></div>
+      <div class="bn-tile"><div class="lbl">Likely to apply</div><div class="val" data-draw="kpi" data-source="wl_kpis" data-field="likely_apply_share" data-row="0" data-fmt="pct">—</div><div class="sub">Rated 4 or 5 out of 5</div></div>
+      <div class="bn-tile"><div class="lbl">Also filled the survey</div><div class="val" data-draw="kpi" data-source="cleaning" data-field="in_both" data-row="0" data-fmt="int">—</div><div class="sub">Matched privately by email or phone</div></div>
+    </div>
+    <div class="bn-grid">
+      <section class="bn-card" id="waitlist-daily">
+        <h3>Sign-ups per day</h3>
+        <p class="note">Bars count each day's sign-ups. The line is the running total.</p>
+        <div class="bn-chart" data-draw="daily" data-source="wl_per_day" data-unit="sign-ups" style="min-height: 13rem"></div>
+      </section>
+      <section class="bn-card" id="waitlist-latest">
+        <h3>Latest sign-ups</h3>
+        <p class="note">Newest first. Emails and phone numbers are left out.</p>
+        <div class="bn-tablewrap">
+          <table class="bn-table compact" data-source="waitlist" data-row-key="wl">
+            <thead><tr>
+              <th data-field="submitted_day">Date</th>
+              <th data-field="name">Name</th>
+              <th data-field="city">City</th>
+              <th data-field="qualification" class="hide-narrow">Qualification</th>
+              <th data-field="apply_likelihood" class="num">Apply</th>
+              <th data-field="also_in_survey">In survey</th>
+            </tr></thead>
+            <tbody data-draw="wltable" data-source="waitlist"></tbody>
+          </table>
+        </div>
       </section>
     </div>
   </section>
@@ -419,22 +515,48 @@
         spec: col(/area of clinical/i), work: col(/currently working/i), sal: col(/salary/i), interest: col(/How interested/i),
         thought: col(/ever thought/i), reasons: col(/biggest reasons/i), concerns: col(/biggest concerns/i), lang: col(/foreign language/i),
         classes: col(/language classes/i), apply: col(/BridgeNurse offered/i), proof: col(/Upload a proof/i), ref: col(/Referral Code/i),
+        status: col(/^Status$/i), repeats: col(/^Repeat submissions$/i), row: col(/^Sheet row$/i),
       };
       const get = (r, k) => (ix[k] >= 0 && r[ix[k]] != null ? String(r[ix[k]]).trim() : '');
       const num = (s) => (s === '' || isNaN(Number(s)) ? null : Number(s));
       const p = (n) => String(n).padStart(2, '0');
       const rows = values.slice(1).filter((r) => r.some((c) => String(c).trim() !== '')).map((r, i) => {
         const m = get(r, 'ts').match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})/);
-        const iso = m ? `${m[3]}-${p(m[1])}-${p(m[2])}T${p(m[4])}:${m[5]}:${m[6]}` : '';
+        const m2 = get(r, 'ts').match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{1,2}):(\d{2}):(\d{2})/);
+        const iso = m ? `${m[3]}-${p(m[1])}-${p(m[2])}T${p(m[4])}:${m[5]}:${m[6]}` : m2 ? `${m2[1]}-${m2[2]}-${m2[3]}T${p(m2[4])}:${m2[5]}:${m2[6]}` : '';
         return {
-          resp: i + 1, name: get(r, 'name'), submitted: iso, submitted_day: iso.slice(0, 10), age: num(get(r, 'age')), city: get(r, 'city'),
+          resp: i + 1, status: get(r, 'status'), repeats: num(get(r, 'repeats')) || 0, sheet_row: num(get(r, 'row')), name: get(r, 'name'), submitted: iso, submitted_day: iso.slice(0, 10), age: num(get(r, 'age')), city: get(r, 'city'),
           qualification: get(r, 'qual'), experience: get(r, 'exp'), specialty: get(r, 'spec'), workplace: get(r, 'work'),
           salary: get(r, 'sal'), interest: num(get(r, 'interest')), thought_abroad: get(r, 'thought'), reasons: get(r, 'reasons'),
           concerns: get(r, 'concerns'), language: get(r, 'lang'), class_likelihood: num(get(r, 'classes')),
           apply_likelihood: num(get(r, 'apply')), proof_uploaded: get(r, 'proof') ? 'Yes' : 'No', referral: get(r, 'ref'),
         };
       });
-      return { columns: ['resp', 'name', 'submitted', 'submitted_day', 'age', 'city', 'qualification', 'experience', 'specialty', 'workplace', 'salary', 'interest', 'thought_abroad', 'reasons', 'concerns', 'language', 'class_likelihood', 'apply_likelihood', 'proof_uploaded', 'referral'], rows };
+      return { columns: ['resp', 'name', 'submitted', 'submitted_day', 'age', 'city', 'qualification', 'experience', 'specialty', 'workplace', 'salary', 'interest', 'thought_abroad', 'reasons', 'concerns', 'language', 'class_likelihood', 'apply_likelihood', 'proof_uploaded', 'referral', 'status', 'repeats', 'sheet_row'], rows };
+    },
+  });
+
+  // The website waitlist form: one row per sign-up.
+  dash.loader('waitlist', {
+    description: 'Turns the Website submissions values (first row = headers) into one row per sign-up.',
+    fn: ({ answer }) => {
+      const values = answer && Array.isArray(answer.values) ? answer.values : [];
+      const head = (values[0] || []).map((h) => String(h).trim());
+      const col = (re) => head.findIndex((h) => re.test(h));
+      const ix = { ts: col(/^Timestamp/i), name: col(/^Name$/i), city: col(/^City$/i), qual: col(/qualification/i), exp: col(/years of professional/i),
+        interest: col(/How interested/i), apply: col(/BridgeNurse offered/i), both: col(/^Also in survey$/i) };
+      const get = (r, k) => (ix[k] >= 0 && r[ix[k]] != null ? String(r[ix[k]]).trim() : '');
+      const num = (s) => (s === '' || isNaN(Number(s)) ? null : Number(s));
+      const p = (n) => String(n).padStart(2, '0');
+      const rows = values.slice(1).filter((r) => r.some((c) => String(c).trim() !== '')).map((r, i) => {
+        const t = get(r, 'ts');
+        const m = t.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{1,2}):(\d{2}):(\d{2})/) ;
+        const u = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})/);
+        const iso = m ? `${m[1]}-${m[2]}-${m[3]}T${p(m[4])}:${m[5]}:${m[6]}` : u ? `${u[3]}-${p(u[1])}-${p(u[2])}T${p(u[4])}:${u[5]}:${u[6]}` : '';
+        return { wl: i + 1, name: get(r, 'name'), submitted: iso, submitted_day: iso.slice(0, 10), city: get(r, 'city'), qualification: get(r, 'qual'),
+          experience: get(r, 'exp'), interest: num(get(r, 'interest')), apply_likelihood: num(get(r, 'apply')), also_in_survey: get(r, 'both') ? 'Yes' : 'No' };
+      });
+      return { columns: ['wl', 'name', 'submitted', 'submitted_day', 'city', 'qualification', 'experience', 'interest', 'apply_likelihood', 'also_in_survey'], rows };
     },
   });
 
@@ -455,7 +577,8 @@
         const tier = score == null ? 'Low' : score >= 75 ? 'High' : score >= 50 ? 'Medium' : 'Low';
         const rawCity = (r.city || '').trim().replace(/\s+/g, ' ');
         const city_norm = rawCity ? alias[rawCity.toLowerCase()] || rawCity.toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase()) : 'Not given';
-        return { ...r, name: (r.name || '').trim(), score, tier, city_norm, referral_label: (r.referral || '').trim() || 'Not given', exp_rank: expOrder.indexOf(r.experience) };
+        return { ...r, name: (r.name || '').trim(), score, tier, city_norm, referral_label: (r.referral || '').trim() || 'Not given', exp_rank: expOrder.indexOf(r.experience),
+          status: (r.status || '').trim() || 'Not contacted', status_rank: ['Not contacted', 'Called', 'Interested', 'Documents', 'Language class', 'Not interested'].indexOf((r.status || '').trim() || 'Not contacted') };
       });
     },
   });
@@ -471,6 +594,10 @@
         responses: n,
         avg_score: scored.length ? scored.reduce((s, r) => s + r.score, 0) / scored.length : null,
         high_share: share((r) => r.tier === 'High'),
+        high_not_contacted: candidates.filter((r) => r.tier === 'High' && r.status === 'Not contacted').length,
+        contacted: candidates.filter((r) => r.status !== 'Not contacted').length,
+        interested_plus: candidates.filter((r) => ['Interested', 'Documents', 'Language class'].includes(r.status)).length,
+        in_class: candidates.filter((r) => r.status === 'Language class').length,
         likely_apply_share: share((r) => Number(r.apply_likelihood) >= 4),
         language_yes_share: share((r) => /^Yes/i.test(r.language || '')),
         referral_share: share((r) => (r.referral || '').trim() !== ''),
@@ -549,6 +676,47 @@
     },
   });
 
+  const statusCalc = (id, title, keep) => dash.calc(id, {
+    inputs: ['candidates'], title, description: 'Nurses at each follow-up stage from the sheet\'s Status column; blank counts as Not contacted.',
+    fn: (candidates) => {
+      const order = ['Not contacted', 'Called', 'Interested', 'Documents', 'Language class', 'Not interested'];
+      const rows = candidates.filter(keep);
+      const total = rows.length || 1;
+      const extra = [...new Set(rows.map((r) => r.status))].filter((s) => !order.includes(s));
+      return order.concat(extra).map((status) => { const n = rows.filter((r) => r.status === status).length; return { status, n, share: n / total }; });
+    },
+  });
+  statusCalc('status_all', 'Follow-up status, all nurses', () => true);
+  statusCalc('status_high', 'Follow-up status, high intent', (r) => r.tier === 'High');
+
+  dash.calc('wl_kpis', {
+    inputs: ['waitlist'], title: 'Website waitlist figures',
+    description: 'Sign-ups in total and in the last 7 days (by submission date), and the share rating likelihood to apply 4 or 5.',
+    fn: (waitlist) => {
+      const days = waitlist.map((r) => r.submitted_day).filter(Boolean).sort();
+      const end = new Date(); const since = new Date(end.getTime() - 6 * 86400000).toISOString().slice(0, 10);
+      const rated = waitlist.filter((r) => r.apply_likelihood != null);
+      return [{ total: waitlist.length, last7: days.filter((d) => d >= since).length,
+        likely_apply_share: rated.length ? rated.filter((r) => r.apply_likelihood >= 4).length / rated.length : null }];
+    },
+  });
+
+  dash.calc('wl_per_day', {
+    inputs: ['waitlist'], title: 'Website sign-ups per day',
+    description: 'Website sign-ups by date with zero days filled in, and the running total.',
+    fn: (waitlist) => {
+      const days = waitlist.map((r) => r.submitted_day).filter(Boolean).sort();
+      if (!days.length) return [];
+      const counts = {};
+      days.forEach((d) => { counts[d] = (counts[d] || 0) + 1; });
+      const out = []; let cum = 0;
+      for (let t = Date.parse(days[0] + 'T00:00:00Z'); t <= Date.parse(days[days.length - 1] + 'T00:00:00Z'); t += 86400000) {
+        const day = new Date(t).toISOString().slice(0, 10); cum += counts[day] || 0; out.push({ day, n: counts[day] || 0, cumulative: cum });
+      }
+      return out;
+    },
+  });
+
   dash.calc('per_day', {
     inputs: ['candidates'], title: 'Responses per day',
     description: 'Responses by submission date with zero days filled in, and the running total.',
@@ -602,7 +770,7 @@
   // ---- shared helpers ----
   const fmt = { int: d3.format(','), pct: d3.format('.0%'), score: (v) => d3.format('.0f')(v) };
   const tierColor = (t) => `var(--color-${t === 'High' ? 'ok' : t === 'Medium' ? 'warn' : 'bad'})`;
-  const filterLabels = { experience: 'Experience', qualification: 'Qualification', salary: 'Salary', specialty: 'Clinical area', city_norm: 'City', referral_label: 'Referral code', reasons: 'Reason', concerns: 'Concern' };
+  const filterLabels = { experience: 'Experience', qualification: 'Qualification', salary: 'Salary', specialty: 'Clinical area', city_norm: 'City', referral_label: 'Referral code', reasons: 'Reason', concerns: 'Concern', status: 'Status' };
   const setFilter = (field, value, mode) => {
     const p = dash.params();
     if (p.ff === field && p.fv === value) dash.setParams({ ff: null, fv: null, fm: null });
@@ -632,6 +800,9 @@
   }));
   dash.onData(() => {
     const st = dash.data('responses').status;
+    const noClean = dash.data('cleaning').status === 'missing', noWl = dash.data('waitlist').status === 'missing';
+    document.querySelectorAll('.bn-needs-clean').forEach((e) => { e.hidden = noClean; });
+    document.querySelectorAll('.bn-needs-wl').forEach((e) => { e.hidden = noWl; });
     document.querySelectorAll('#data-access').forEach((a) => { a.hidden = !['connect', 'declined', 'error'].includes(st); });
     const p = dash.params();
     document.querySelectorAll('.bn-detail-hint').forEach((h) => { h.hidden = !!(p.pick && st === 'ok'); });
@@ -772,7 +943,8 @@
   });
 
   dash.draw('daily', (el) => {
-    const d = dash.data('per_day');
+    const d = dash.data(el.dataset.source || 'per_day');
+    const unit = el.dataset.unit || 'responses';
     el.replaceChildren();
     if (d.status !== 'ok' || !d.data.length) return;
     const rows = d.data.map((r) => ({ ...r, date: new Date(r.day + 'T00:00:00Z') }));
@@ -786,7 +958,8 @@
     svg.append('g').selectAll('text').data(y2.ticks(4).filter(Number.isInteger)).join('text').attr('x', W - m.r + 6).attr('y', (v) => y2(v)).attr('dy', '0.35em').text((v) => v);
     const every = Math.ceil(rows.length / Math.max(2, Math.floor((W - m.l - m.r) / 56)));
     svg.append('g').selectAll('text').data(rows.filter((r, i) => i % every === 0)).join('text').attr('x', (r) => x(r.day) + x.bandwidth() / 2).attr('y', H - 6).attr('text-anchor', 'middle').text((r) => d3.utcFormat('%b %-d')(r.date));
-    svg.append('g').selectAll('rect').data(rows).join('rect').attr('x', (r) => x(r.day)).attr('width', x.bandwidth()).attr('y', (r) => y(r.n)).attr('height', (r) => y(0) - y(r.n)).attr('rx', Math.min(3, x.bandwidth() / 2)).attr('fill', dash.colors[0]);
+    const bw = Math.min(x.bandwidth(), 40);
+    svg.append('g').selectAll('rect').data(rows).join('rect').attr('x', (r) => x(r.day) + (x.bandwidth() - bw) / 2).attr('width', bw).attr('y', (r) => y(r.n)).attr('height', (r) => y(0) - y(r.n)).attr('rx', Math.min(3, bw / 2)).attr('fill', dash.colors[0]);
     svg.append('path').datum(rows).attr('fill', 'none').attr('stroke', dash.colors[1]).attr('stroke-width', 2).attr('stroke-linejoin', 'round').attr('stroke-linecap', 'round')
       .attr('d', d3.line().x((r) => x(r.day) + x.bandwidth() / 2).y((r) => y2(r.cumulative)));
     const last = rows[rows.length - 1];
@@ -794,7 +967,7 @@
     const tip = tipFor(el);
     const dot = svg.append('circle').attr('r', 4).attr('fill', dash.colors[1]).style('display', 'none');
     svg.append('g').selectAll('rect').data(rows).join('rect').attr('x', (r) => x(r.day) - (x.step() - x.bandwidth()) / 2).attr('width', x.step()).attr('y', m.t).attr('height', H - m.t - m.b).attr('fill', 'transparent')
-      .on('pointerenter pointermove', (ev, r) => { dot.style('display', null).attr('cx', x(r.day) + x.bandwidth() / 2).attr('cy', y2(r.cumulative)); tip.show(ev, [d3.utcFormat('%a, %b %-d')(r.date), `${fmt.int(r.n)} responses that day`, `${fmt.int(r.cumulative)} in total`]); })
+      .on('pointerenter pointermove', (ev, r) => { dot.style('display', null).attr('cx', x(r.day) + x.bandwidth() / 2).attr('cy', y2(r.cumulative)); tip.show(ev, [d3.utcFormat('%a, %b %-d')(r.date), `${fmt.int(r.n)} ${unit} that day`, `${fmt.int(r.cumulative)} in total`]); })
       .on('pointerleave', () => { dot.style('display', 'none'); tip.hide(); });
   });
 
@@ -815,6 +988,33 @@
       });
   };
 
+  dash.draw('calllist', (tbody) => {
+    tbody.replaceChildren();
+    const d = dash.data('candidates');
+    if (d.status !== 'ok') return;
+    d.data.filter((r) => r.tier === 'High' && r.status === 'Not contacted')
+      .sort((a, b) => b.score - a.score || String(a.submitted).localeCompare(String(b.submitted)))
+      .forEach((r) => {
+        const tr = document.createElement('tr'); tr.dataset.key = String(r.resp);
+        [[r.sheet_row == null ? '' : String(r.sheet_row), 'num'], [r.name, 'name'], [r.score == null ? '' : String(r.score), 'num'], [r.city], [r.workplace, 'hide-narrow'],
+          [r.experience, 'hide-narrow'], [r.apply_likelihood == null ? '' : String(r.apply_likelihood), 'num'], [r.submitted_day, 'hide-narrow']]
+          .forEach(([t, c]) => { const td = document.createElement('td'); td.textContent = t || ''; if (c) td.className = c; tr.appendChild(td); });
+        tbody.appendChild(tr);
+      });
+  });
+
+  dash.draw('wltable', (tbody) => {
+    tbody.replaceChildren();
+    const d = dash.data('waitlist');
+    if (d.status !== 'ok') return;
+    d.data.slice().sort((a, b) => String(b.submitted).localeCompare(String(a.submitted))).forEach((r) => {
+      const tr = document.createElement('tr'); tr.dataset.key = String(r.wl);
+      [[r.submitted_day], [r.name, 'name'], [r.city], [r.qualification, 'hide-narrow'], [r.apply_likelihood == null ? '' : String(r.apply_likelihood), 'num'], [r.also_in_survey]]
+        .forEach(([t, c]) => { const td = document.createElement('td'); td.textContent = t || ''; if (c) td.className = c; tr.appendChild(td); });
+      tbody.appendChild(tr);
+    });
+  });
+
   dash.draw('table', (tbody) => {
     tbody.replaceChildren();
     const pick = Number(dash.params().pick);
@@ -833,6 +1033,7 @@
       const num = document.createElement('span'); num.textContent = r.score == null ? '' : String(r.score);
       wrap.append(num, bar); sc.appendChild(wrap);
       const tc = td(null); const pill = document.createElement('span'); pill.className = `bn-pill ${r.tier}`; pill.textContent = r.tier; tc.appendChild(pill);
+      const sc2 = td(null); const sp = document.createElement('span'); sp.className = `bn-status s-${r.status.replace(/\s+/g, '-')}`; sp.textContent = r.status; sc2.appendChild(sp);
       td(r.submitted_day, 'hide-narrow');
       td(r.city);
       td(r.qualification, 'hide-narrow');
@@ -871,6 +1072,9 @@
     row('Salary', r.salary);
     row('Referral code', r.referral);
     row('Proof uploaded', r.proof_uploaded);
+    row('Follow-up status', r.status);
+    row('Sheet row', r.sheet_row == null ? '' : String(r.sheet_row));
+    if (r.repeats) row('Repeat submissions', `${r.repeats} earlier (latest answers shown)`);
     left.append(h, pill, document.createElement('br'), document.createElement('br'), dl);
     const right = document.createElement('div');
     const dl2 = document.createElement('dl');

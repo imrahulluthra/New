@@ -8,11 +8,26 @@ connector, and the Google Sheet can stay private.
 It reads the sheet live: every time someone opens the page, taps **Refresh**, or comes back
 to the tab, and every 5 minutes while it is open.
 
+## What the dashboard does with the data
+
+- **Counts each nurse once.** Test entries (a name like "Test" or "Tesr", a test email, or Status set to
+  "Exclude (test/spam)") are left out. Submissions that share an email or phone count as one person,
+  using their latest answers. The page says how many were left out.
+- **Tidies referral codes.** Codes are upper-cased, "By- Rahul sir" counts as RAH961 (see `REFERRAL_ALIASES`
+  in `Code.gs`), and a referral code typed into the Name field is moved to the referral column.
+- **Follow-up pipeline.** Reads the **Status** column (column V of *Form Responses 1*):
+  Not contacted → Called → Interested → Documents → Language class, plus Not interested and
+  Exclude (test/spam). A blank status counts as Not contacted. The call list shows high-intent nurses
+  who are not yet contacted, with their **sheet row** so the team can find the phone number in the sheet.
+- **Website waitlist.** Reads the *Website submissions* tab: total sign-ups, last 7 days, sign-ups per
+  day, latest sign-ups, and how many people also filled the survey (matched privately by email or phone).
+  This tab is only read, never changed, so the website form is not affected.
+
 ## What is in this folder
 
 | File | What it is |
 |---|---|
-| `Code.gs` | Runs on Google's servers. Reads the sheet and removes emails, phone numbers and proof-file links before anything reaches a browser. |
+| `Code.gs` | Runs on Google's servers. Reads both tabs, cleans the data, and removes emails, phone numbers and proof-file links before anything reaches a browser. |
 | `Index.html` | The dashboard page. |
 
 ## Set it up (about 5 minutes, once)
@@ -53,7 +68,7 @@ to the tab, and every 5 minutes while it is open.
 
 ## If something goes wrong
 
-- **"The survey data couldn't be loaded"**: open the Apps Script project, run `getSurveyValues`
+- **"The survey data couldn't be loaded"**: open the Apps Script project, run `getDashboardData`
   once from the toolbar to see the error, and check the sheet ID and tab name.
 - **"Authorization is required" or the page asks viewers to sign in**: check *Execute as: Me* and
   *Who has access* in **Deploy → Manage deployments**.
