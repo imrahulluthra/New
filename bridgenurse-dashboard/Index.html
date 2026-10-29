@@ -40,6 +40,7 @@
   .host-bar button { font: inherit; color: var(--color-fg); background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: 999px; padding: 4px 12px; cursor: pointer; }
   .host-bar button:disabled { opacity: .6; cursor: default; }
   [hidden] { display: none !important; }
+  #dash-root .bn-section { scroll-margin-top: 56px; }
   img, svg { max-width: 100%; }
   #dash-root { max-width: 1280px; margin-inline: auto; box-sizing: border-box;
     padding-block: 20px 40px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
@@ -107,7 +108,7 @@
       setParams(p) { Object.keys(p).forEach((k) => { if (p[k] == null) delete params[k]; else params[k] = p[k]; }); schedule(); },
       resetParams() { params = {}; schedule(); },
       refresh: () => load(),
-      setLink(name) { try { history.replaceState(null, '', '#' + name); } catch (e) {} },
+      setLink() {},
       get colors() { return [css('--c1'), css('--c2'), '#8a63d2', '#2aa198', '#d6457a', '#7a8b2a', '#b06b2f', '#4a7f9c']; },
     };
 
@@ -134,9 +135,16 @@
     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') load(); });
     window.__hostStart = () => {
       document.querySelectorAll('.host-refresh').forEach((b) => b.addEventListener('click', load));
+      // Apps Script runs the page in a frame where #section links leave the page, so scroll in place instead.
+      document.addEventListener('click', (e) => {
+        const a = e.target.closest('a[href^="#"]');
+        if (!a) return;
+        e.preventDefault();
+        const t = document.getElementById(a.getAttribute('href').slice(1));
+        if (t) t.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
       render(); load();
       setInterval(() => { if (document.visibilityState === 'visible') load(); }, 5 * 60 * 1000);
-      const h = location.hash.slice(1); const t = h && document.getElementById(h); if (t) setTimeout(() => t.scrollIntoView(), 300);
     };
   })();
 </script>
