@@ -1,0 +1,887 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<base target="_top">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>BridgeNurse Survey</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=Source+Serif+4:opsz,wght@8..60,400&display=swap">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+<style>
+  :root {
+    --color-bg: #f6f7f9; --color-panel: #ffffff; --color-fg: #1d2330; --color-fg-muted: #5f6b7d; --color-border-line: #e2e6ec;
+    --color-ok: #1f8a5b; --color-warn: #c27a0e; --color-bad: #c8423b;
+    --cds-chart-grid: #e9edf2; --cds-chart-muted: #cfd6df; --cds-surface-popover: #ffffff; --cds-border: #dfe3ea;
+    --cds-shadow-popover: 0 6px 20px rgba(20, 30, 50, .12); --cds-text-secondary: #5f6b7d;
+    --c1: #2f6fdf; --c2: #d9653b;
+    --font-anthropic-sans: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --font-anthropic-serif: "Source Serif 4", Georgia, "Times New Roman", serif;
+    --cds-gap-xs: 4px; --cds-gap-sm: 8px; --cds-gap-md: 16px; --cds-gap-lg: 24px; --cds-gap-xl: 32px;
+    --cds-pad-xs: 4px; --cds-pad-sm: 8px; --cds-pad-md: 12px; --cds-pad-lg: 16px; --cds-pad-xl: 24px;
+    --cds-radius: 10px; --cds-font-size-caption: 12px; --cds-font-size-body: 14px; --cds-font-size-heading: 16px; --cds-font-size-title: 28px;
+    --cds-font-weight-medium: 600; --cds-dur-slow: 400ms; --cds-ease-out: cubic-bezier(.2, .8, .2, 1);
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --color-bg: #121418; --color-panel: #1b1e24; --color-fg: #eceef2; --color-fg-muted: #a0a8b6; --color-border-line: #2c313a;
+      --color-ok: #4cc38a; --color-warn: #e9a23b; --color-bad: #ef6b63;
+      --cds-chart-grid: #262a32; --cds-chart-muted: #3a404b; --cds-surface-popover: #23272f; --cds-border: #333945;
+      --cds-shadow-popover: 0 6px 20px rgba(0, 0, 0, .45); --cds-text-secondary: #a0a8b6;
+      --c1: #6aa1ff; --c2: #f08a5d;
+      color-scheme: dark;
+    }
+  }
+  html, body { margin: 0; background: var(--color-bg); color: var(--color-fg); font-family: var(--font-anthropic-sans); font-size: 14px; -webkit-text-size-adjust: 100%; }
+  .host-bar { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 12px; justify-content: flex-end; flex-wrap: wrap;
+    padding: 8px max(16px, env(safe-area-inset-right, 0px)) 8px max(16px, env(safe-area-inset-left, 0px));
+    background: var(--color-bg); border-bottom: 1px solid var(--color-border-line); font-size: 12px; color: var(--color-fg-muted); }
+  .host-bar button { font: inherit; color: var(--color-fg); background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: 999px; padding: 4px 12px; cursor: pointer; }
+  .host-bar button:disabled { opacity: .6; cursor: default; }
+  [hidden] { display: none !important; }
+  img, svg { max-width: 100%; }
+  #dash-root { max-width: 1280px; margin-inline: auto; box-sizing: border-box;
+    padding-block: 20px 40px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+  #dash-root *, #dash-root *::before, #dash-root *::after { box-sizing: border-box; }
+  #dash-root a { color: inherit; }
+  [data-dash-state=loading] [data-draw=kpi] { animation: host-pulse 1.2s ease-in-out infinite; }
+  @keyframes host-pulse { 50% { opacity: .35; } }
+</style>
+<script>
+  // A small stand-in for the Claude dashboard runtime: one dataset loaded from the sheet,
+  // calculations on top of it, and named drawings redrawn whenever data, filters or width change.
+  (function () {
+    const loaders = {}, calcs = {}, draws = {}, listeners = [];
+    const ds = { responses: { status: 'loading', rows: [], columns: [], message: '', refreshing: false } };
+    let params = {}, version = 0, cache = {}, scheduled = false;
+    const css = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+    function data(id, seen) {
+      if (ds[id]) { const d = ds[id]; return { status: d.status, data: d.status === 'ok' ? d.rows : [], columns: d.columns, message: d.message, refreshing: d.refreshing, meta: [] }; }
+      const c = calcs[id];
+      if (!c) return { status: 'missing', data: [], columns: [], meta: [] };
+      if (cache[id] && cache[id].v === version) return cache[id].out;
+      seen = seen || {};
+      if (seen[id]) return { status: 'error', data: [], message: 'circular', meta: [] };
+      seen[id] = true;
+      const ins = c.inputs.map((i) => data(i, seen));
+      const bad = ins.find((x) => x.status !== 'ok');
+      let out;
+      if (bad) out = { status: bad.status, data: [], message: bad.message, refreshing: bad.refreshing, meta: [] };
+      else {
+        try {
+          const rows = c.fn(...ins.map((x) => x.data));
+          out = { status: 'ok', data: rows, columns: Array.isArray(rows) && rows[0] ? Object.keys(rows[0]) : [], refreshing: ins.some((x) => x.refreshing), meta: [] };
+        } catch (e) { console.error(id, e); out = { status: 'error', data: [], message: String(e), meta: [] }; }
+      }
+      cache[id] = { v: version, out };
+      return out;
+    }
+
+    function runDraw(name) {
+      const fn = draws[name];
+      if (!fn) return;
+      document.querySelectorAll('[data-draw="' + name + '"]').forEach((el) => {
+        if (el.closest('[hidden]')) return;
+        try { fn(el); } catch (e) { console.error('draw ' + name, e); }
+      });
+    }
+    function render() {
+      scheduled = false;
+      const st = ds.responses.status;
+      const root = document.getElementById('dash-root');
+      if (root) { if (st === 'loading') root.setAttribute('data-dash-state', 'loading'); else if (st === 'error') root.setAttribute('data-dash-state', 'error'); else root.removeAttribute('data-dash-state'); }
+      listeners.forEach((fn) => { try { fn(); } catch (e) { console.error(e); } });
+      Object.keys(draws).forEach(runDraw);
+    }
+    function schedule() { if (!scheduled) { scheduled = true; requestAnimationFrame(render); } }
+
+    window.dash = {
+      loader(id, o) { loaders[id] = o; },
+      calc(id, o) { calcs[id] = o; },
+      data: (id) => data(id),
+      onData(fn) { listeners.push(fn); },
+      draw(name, fn) { if (fn) draws[name] = fn; else runDraw(name); },
+      params: () => Object.assign({}, params),
+      setParams(p) { Object.keys(p).forEach((k) => { if (p[k] == null) delete params[k]; else params[k] = p[k]; }); schedule(); },
+      resetParams() { params = {}; schedule(); },
+      refresh: () => load(),
+      setLink(name) { try { history.replaceState(null, '', '#' + name); } catch (e) {} },
+      get colors() { return [css('--c1'), css('--c2'), '#8a63d2', '#2aa198', '#d6457a', '#7a8b2a', '#b06b2f', '#4a7f9c']; },
+    };
+
+    const stamp = () => document.querySelectorAll('.host-updated').forEach((s) => { s.textContent = ds.responses.updated ? 'Updated ' + new Date(ds.responses.updated).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : 'Loading…'; });
+    function load() {
+      const d = ds.responses;
+      if (d.status === 'ok') d.refreshing = true;
+      document.querySelectorAll('.host-refresh').forEach((b) => { b.disabled = true; });
+      const done = () => { document.querySelectorAll('.host-refresh').forEach((b) => { b.disabled = false; }); stamp(); version++; cache = {}; schedule(); };
+      google.script.run
+        .withSuccessHandler((answer) => {
+          try {
+            const out = loaders.responses.fn({ answer });
+            d.rows = out.rows || out; d.columns = out.columns || []; d.status = 'ok'; d.message = ''; d.updated = (answer && answer.updated) || new Date().toISOString();
+          } catch (e) { d.status = 'error'; d.message = String(e); }
+          d.refreshing = false; done();
+        })
+        .withFailureHandler((err) => { if (d.status !== 'ok') d.status = 'error'; d.message = String(err && err.message || err); d.refreshing = false; done(); })
+        .getSurveyValues();
+    }
+
+    let w = window.innerWidth;
+    window.addEventListener('resize', () => { if (Math.abs(window.innerWidth - w) > 8) { w = window.innerWidth; schedule(); } });
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') load(); });
+    window.__hostStart = () => {
+      document.querySelectorAll('.host-refresh').forEach((b) => b.addEventListener('click', load));
+      render(); load();
+      setInterval(() => { if (document.visibilityState === 'visible') load(); }, 5 * 60 * 1000);
+      const h = location.hash.slice(1); const t = h && document.getElementById(h); if (t) setTimeout(() => t.scrollIntoView(), 300);
+    };
+  })();
+</script>
+
+</head>
+<body>
+<div class="host-bar"><span class="host-updated">Loading…</span><button type="button" class="host-refresh">Refresh</button></div>
+<div id="dash-root">
+<style>
+  .bn { display: grid; gap: var(--cds-gap-lg); font-family: var(--font-anthropic-sans); }
+  .bn-head h1 { font-family: var(--font-anthropic-serif); font-weight: 400; font-size: var(--cds-font-size-title); margin: 0; text-wrap: balance; }
+  .bn-head p { margin: var(--cds-gap-xs) 0 0; color: var(--color-fg-muted); font-size: var(--cds-font-size-body); max-width: 70ch; }
+  .bn-head b { font-weight: 600; color: var(--color-fg); }
+  .bn-nav { display: flex; gap: var(--cds-gap-xs); flex-wrap: wrap; }
+  .bn-nav a { font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); text-decoration: none; border: 1px solid var(--color-border-line); border-radius: 999px; padding: 2px 10px; }
+  .bn-nav a:hover, .bn-nav a:focus-visible { color: var(--color-fg); border-color: var(--color-fg-muted); }
+  .bn-tiles { display: grid; gap: var(--cds-gap-md); grid-template-columns: repeat(auto-fit, minmax(min(100%, 10rem), 1fr)); }
+  .bn-tile, .bn-card { background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); padding: var(--cds-pad-lg); min-width: 0; }
+  .bn-tile .lbl { color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); }
+  .bn-tile .val { font-family: var(--font-anthropic-serif); font-weight: 400; font-size: var(--cds-font-size-title); font-variant-numeric: tabular-nums; margin-top: var(--cds-gap-xs); min-height: 1.3em; }
+  .bn-tile .sub { color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); margin-top: var(--cds-gap-xs); }
+  .bn-grid { display: grid; gap: var(--cds-gap-md); grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr)); }
+  .bn-grid-3 { display: grid; gap: var(--cds-gap-md); grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr)); }
+  .bn-card h3 { font-size: var(--cds-font-size-heading); font-weight: var(--cds-font-weight-medium); margin: 0; }
+  .bn-card .note { color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); margin: var(--cds-gap-xs) 0 var(--cds-gap-md); }
+  .bn-section { display: grid; gap: var(--cds-gap-md); scroll-margin-top: 1rem; }
+  .bn-section > h2 { font-family: var(--font-anthropic-serif); font-weight: 400; font-size: var(--cds-font-size-title); margin: var(--cds-gap-md) 0 0; }
+  .bn-section > .lede { color: var(--color-fg-muted); margin: 0; max-width: 72ch; }
+  .bn-chart { position: relative; min-height: 10rem; }
+  .bn-chart svg { display: block; overflow: visible; }
+  .bn-chart text { font-size: var(--cds-font-size-caption); fill: var(--color-fg-muted); font-variant-numeric: tabular-nums; }
+  .bn-chart text.lab { fill: var(--color-fg); }
+  .bn-chart text.big { font-family: var(--font-anthropic-serif); fill: var(--color-fg); }
+  .bn-chart .hit { cursor: pointer; }
+  .bn-chart .hit:focus-visible { outline: 2px solid var(--color-fg-muted); }
+  .bn-tip { position: absolute; z-index: 5; pointer-events: none; background: var(--cds-surface-popover); border: 1px solid var(--cds-border); border-radius: var(--cds-radius); box-shadow: var(--cds-shadow-popover); padding: var(--cds-pad-xs) var(--cds-pad-sm); font-size: var(--cds-font-size-caption); white-space: nowrap; }
+  .bn-tip .d { color: var(--cds-text-secondary); }
+  .bn-legend { display: flex; flex-wrap: wrap; gap: var(--cds-gap-xs) var(--cds-gap-md); font-size: var(--cds-font-size-caption); margin-top: var(--cds-gap-sm); }
+  .bn-legend button { font: inherit; display: inline-flex; align-items: center; gap: 6px; background: none; border: 1px solid transparent; border-radius: 999px; padding: 2px 8px; color: var(--color-fg); cursor: pointer; }
+  .bn-legend button[aria-pressed=true] { border-color: var(--color-fg-muted); }
+  .bn-legend i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .bn-controls { display: flex; gap: var(--cds-gap-sm); align-items: center; flex-wrap: wrap; }
+  .bn-controls input { font: inherit; padding: var(--cds-pad-xs) var(--cds-pad-sm); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); background: var(--color-bg); color: var(--color-fg); min-width: 0; flex: 1 1 14rem; max-width: 22rem; }
+  .bn-seg { display: inline-flex; border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); overflow: hidden; }
+  .bn-seg button { font: inherit; font-size: var(--cds-font-size-caption); background: none; border: 0; padding: 6px 12px; color: var(--color-fg-muted); cursor: pointer; }
+  .bn-seg button + button { border-left: 1px solid var(--color-border-line); }
+  .bn-seg button[aria-pressed=true] { background: var(--color-bg); color: var(--color-fg); font-weight: 600; }
+  .bn-chip { font: inherit; font-size: var(--cds-font-size-caption); display: inline-flex; gap: 6px; align-items: center; border: 1px solid var(--color-border-line); border-radius: 999px; padding: 4px 10px; background: var(--color-bg); color: var(--color-fg); cursor: pointer; }
+  .bn-hint { color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); }
+  .bn-tablewrap { max-height: 34rem; overflow: auto; margin-top: var(--cds-gap-sm); }
+  .bn-table { border-collapse: collapse; width: 100%; font-size: var(--cds-font-size-caption); font-variant-numeric: tabular-nums; }
+  .bn-table th { position: sticky; top: 0; z-index: 1; background: var(--color-panel); text-align: left; font-weight: var(--cds-font-weight-medium); padding: var(--cds-pad-xs) var(--cds-pad-sm); border-bottom: 1px solid var(--color-border-line); white-space: nowrap; cursor: pointer; user-select: none; }
+  .bn-table th[aria-sort=ascending]::after { content: " ↑"; }
+  .bn-table th[aria-sort=descending]::after { content: " ↓"; }
+  .bn-table td { padding: var(--cds-pad-xs) var(--cds-pad-sm); border-bottom: 1px solid var(--color-border-line); vertical-align: middle; }
+  .bn-table tbody tr { cursor: pointer; }
+  .bn-table tbody tr:hover td { background: var(--color-bg); }
+  .bn-table tbody tr.on td { background: var(--color-bg); font-weight: 600; }
+  .bn-table td.num, .bn-table th.num { text-align: right; }
+  .bn-table td.name { font-weight: 600; white-space: nowrap; }
+  .bn-scorecell { display: flex; align-items: center; gap: 8px; min-width: 7.5rem; }
+  .bn-scorebar { flex: 1; height: 6px; border-radius: 3px; background: var(--color-border-line); overflow: hidden; }
+  .bn-scorebar span { display: block; height: 100%; border-radius: 3px; }
+  .bn-pill { display: inline-block; font-size: var(--cds-font-size-caption); font-weight: 600; padding: 1px 8px; border-radius: 999px; border: 1px solid currentColor; white-space: nowrap; }
+  .bn-pill.High { color: var(--color-ok); }
+  .bn-pill.Medium { color: var(--color-warn); }
+  .bn-pill.Low { color: var(--color-bad); }
+  .bn-detail { display: grid; gap: var(--cds-gap-md); grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr)); }
+  .bn-detail h4 { margin: 0; font-family: var(--font-anthropic-serif); font-weight: 400; font-size: var(--cds-font-size-title); }
+  .bn-detail dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: var(--cds-font-size-caption); }
+  .bn-detail dt { color: var(--color-fg-muted); }
+  .bn-detail dd { margin: 0; }
+  .bn-dots { display: inline-flex; gap: 3px; vertical-align: middle; }
+  .bn-dots i { width: 9px; height: 9px; border-radius: 50%; background: var(--color-border-line); display: inline-block; }
+  .bn-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+  .bn-tags span { font-size: var(--cds-font-size-caption); border: 1px solid var(--color-border-line); border-radius: 999px; padding: 1px 8px; }
+  @media (max-width: 44rem) { .bn-table .hide-narrow { display: none; } }
+  .bn-alert { display: grid; gap: 4px; padding: var(--cds-pad-md) var(--cds-pad-lg); border: 1px solid var(--color-bad); border-radius: var(--cds-radius); background: var(--color-panel); font-size: var(--cds-font-size-body); }
+  .bn-alert span { color: var(--color-fg-muted); }
+  [data-draw=detail][data-dash-source-state=empty] { display: none; }
+  [data-dash-source-state=empty] { color: transparent; }
+  [data-dash-source-state=refreshing] { opacity: .5; transition: opacity var(--cds-dur-slow); }
+  @media (prefers-reduced-motion: no-preference) {
+    .bn-grow { animation: bn-grow var(--cds-dur-slow) var(--cds-ease-out) both; transform-origin: left center; }
+    @keyframes bn-grow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+  }
+</style>
+
+<div class="bn">
+  <header class="bn-head" id="overview">
+    <h1>BridgeNurse nurse survey</h1>
+    <p><b data-draw="kpi" data-source="kpis" data-field="responses" data-row="0" data-fmt="int">—</b> nurses have filled the form. Their average intent score is <b data-draw="kpi" data-source="kpis" data-field="avg_score" data-row="0" data-fmt="score">—</b> out of 100, and <b data-draw="kpi" data-source="kpis" data-field="high_share" data-row="0" data-fmt="pct">—</b> are high-intent candidates.</p>
+  </header>
+
+  <div class="bn-alert" id="data-access" hidden>
+    <b>The survey data couldn't be loaded.</b>
+    <span>Tap Refresh to try again. If it keeps failing, ask the dashboard owner to check that the Google Sheet still exists and that the web app is deployed to run as them.</span>
+  </div>
+
+  <nav class="bn-nav" aria-label="Sections">
+    <a href="#intent">Overall intent</a>
+    <a href="#candidates">Candidates</a>
+    <a href="#pipeline">Pipeline</a>
+    <a href="#motivations">Motivations</a>
+    <a href="#profile">Profile</a>
+  </nav>
+
+  <div class="bn-tiles" id="headline" data-fetchpriority="high">
+    <div class="bn-tile"><div class="lbl">Responses</div><div class="val" data-draw="kpi" data-source="kpis" data-field="responses" data-row="0" data-fmt="int">—</div><div class="sub">All form submissions</div></div>
+    <div class="bn-tile"><div class="lbl">Average intent score</div><div class="val" data-draw="kpi" data-source="kpis" data-field="avg_score" data-row="0" data-fmt="score">—</div><div class="sub">Out of 100</div></div>
+    <div class="bn-tile"><div class="lbl">High intent</div><div class="val" data-draw="kpi" data-source="kpis" data-field="high_share" data-row="0" data-fmt="pct">—</div><div class="sub">Score 75 or more</div></div>
+    <div class="bn-tile"><div class="lbl">Likely to apply</div><div class="val" data-draw="kpi" data-source="kpis" data-field="likely_apply_share" data-row="0" data-fmt="pct">—</div><div class="sub">Rated 4 or 5 out of 5</div></div>
+    <div class="bn-tile"><div class="lbl">Will learn a language</div><div class="val" data-draw="kpi" data-source="kpis" data-field="language_yes_share" data-row="0" data-fmt="pct">—</div><div class="sub">If the job needs it</div></div>
+    <div class="bn-tile"><div class="lbl">Came by referral</div><div class="val" data-draw="kpi" data-source="kpis" data-field="referral_share" data-row="0" data-fmt="pct">—</div><div class="sub">Gave a referral code</div></div>
+  </div>
+
+  <section class="bn-section" id="intent">
+    <h2>Overall intent</h2>
+    <p class="lede">Every candidate gets an intent score from 0 to 100, built from their own answers. Likelihood to apply counts most, then interest in working abroad, willingness to learn a language, readiness for language classes and whether they have already thought of moving. Click a slice or bar to list those candidates below.</p>
+    <div class="bn-grid">
+      <section class="bn-card" id="intent-mix">
+        <h3>Intent mix</h3>
+        <p class="note">Share of candidates at each intent level.</p>
+        <div class="bn-chart" data-draw="donut" data-source="tiers kpis" style="min-height: 15rem"></div>
+        <div class="bn-legend" data-draw="tierlegend" data-source="tiers"></div>
+      </section>
+      <section class="bn-card" id="intent-gauge">
+        <h3>Average intent score</h3>
+        <p class="note">All candidates, out of 100. Bands show the intent levels.</p>
+        <div class="bn-chart" data-draw="gauge" data-source="kpis tiers" style="min-height: 15rem"></div>
+      </section>
+    </div>
+    <div class="bn-grid">
+      <section class="bn-card" id="intent-dist">
+        <h3>How intent scores spread</h3>
+        <p class="note">Number of candidates in each 10-point band of the score.</p>
+        <div class="bn-chart" data-draw="hist" data-source="score_bins"></div>
+      </section>
+      <section class="bn-card" id="intent-components">
+        <h3>What drives the score</h3>
+        <p class="note">Average answer to each intent question, scaled to 100.</p>
+        <div class="bn-chart" data-draw="bars" data-source="components" data-label="question" data-value="avg" data-fmt="score" data-max="100">—</div>
+      </section>
+    </div>
+    <div class="bn-grid-3">
+      <section class="bn-card" id="intent-by-experience">
+        <h3>Intent by experience</h3>
+        <p class="note">Average intent score. Click to list.</p>
+        <div class="bn-chart" data-draw="bars" data-source="intent_by_experience" data-label="group" data-value="avg" data-fmt="avgn" data-max="100" data-filter="experience">—</div>
+      </section>
+      <section class="bn-card" id="intent-by-qualification">
+        <h3>Intent by qualification</h3>
+        <p class="note">Average intent score. Click to list.</p>
+        <div class="bn-chart" data-draw="bars" data-source="intent_by_qualification" data-label="group" data-value="avg" data-fmt="avgn" data-max="100" data-filter="qualification">—</div>
+      </section>
+      <section class="bn-card" id="intent-by-salary">
+        <h3>Intent by salary</h3>
+        <p class="note">Average intent score. Click to list.</p>
+        <div class="bn-chart" data-draw="bars" data-source="intent_by_salary" data-label="group" data-value="avg" data-fmt="avgn" data-max="100" data-filter="salary">—</div>
+      </section>
+    </div>
+  </section>
+
+  <section class="bn-section" id="candidates">
+    <h2>Candidates</h2>
+    <p class="lede">Every candidate with their intent score and level beside their name. Click a row to see their full answers. Click a column heading to sort. Emails and phone numbers are left out.</p>
+    <div class="bn-card">
+      <div class="bn-controls">
+        <input id="bn-search" class="bn-search" type="search" placeholder="Search name, city, workplace or code" aria-label="Search candidates">
+        <div class="bn-seg" role="group" aria-label="Intent level">
+          <button type="button" class="bn-tierbtn" data-tier="">All</button>
+          <button type="button" class="bn-tierbtn" data-tier="High">High</button>
+          <button type="button" class="bn-tierbtn" data-tier="Medium">Medium</button>
+          <button type="button" class="bn-tierbtn" data-tier="Low">Low</button>
+        </div>
+        <button type="button" class="bn-chip bn-clear" hidden>Filtered by <b data-draw="filterlabel">—</b> ×</button>
+      </div>
+      <div class="bn-tablewrap">
+        <table class="bn-table" data-source="candidates" data-row-key="resp">
+          <thead><tr>
+            <th data-field="resp" class="num bn-sort" data-sort="resp">#</th>
+            <th data-field="name" class="bn-sort" data-sort="name">Candidate</th>
+            <th data-field="score" class="bn-sort" data-sort="score">Intent score</th>
+            <th data-field="tier" class="bn-sort" data-sort="score">Intent</th>
+            <th data-field="submitted_day" class="bn-sort hide-narrow" data-sort="submitted">Date</th>
+            <th data-field="city" class="bn-sort" data-sort="city">City</th>
+            <th data-field="qualification" class="bn-sort hide-narrow" data-sort="qualification">Qualification</th>
+            <th data-field="experience" class="bn-sort hide-narrow" data-sort="exp_rank">Experience</th>
+            <th data-field="specialty" class="bn-sort hide-narrow" data-sort="specialty">Clinical area</th>
+            <th data-field="apply_likelihood" class="num bn-sort" data-sort="apply_likelihood">Apply</th>
+            <th data-field="referral" class="bn-sort hide-narrow" data-sort="referral">Code</th>
+          </tr></thead>
+          <tbody data-draw="table" data-source="candidates"></tbody>
+        </table>
+      </div>
+    </div>
+    <section class="bn-card" id="candidate-detail">
+      <span class="bn-hint bn-detail-hint">Click a candidate in the list to see their answers here.</span>
+      <div data-draw="detail" data-source="candidates">—</div>
+    </section>
+  </section>
+
+  <section class="bn-section" id="pipeline">
+    <h2>Pipeline</h2>
+    <div class="bn-grid">
+      <section class="bn-card" id="funnel">
+        <h3>From interest to application</h3>
+        <p class="note">Each step keeps only the nurses who passed every step above it.</p>
+        <div class="bn-chart" data-draw="bars" data-source="funnel" data-label="step" data-fmt="count">—</div>
+      </section>
+      <section class="bn-card" id="daily">
+        <h3>Responses per day</h3>
+        <p class="note">Bars count each day's responses. The line is the running total.</p>
+        <div class="bn-chart" data-draw="daily" data-source="per_day" style="min-height: 13rem"></div>
+      </section>
+    </div>
+  </section>
+
+  <section class="bn-section" id="motivations">
+    <h2>Motivations</h2>
+    <p class="lede">Nurses could pick several answers. Click a bar to list the candidates who picked it.</p>
+    <div class="bn-grid">
+      <section class="bn-card" id="reasons">
+        <h3>Reasons to work abroad</h3>
+        <p class="note">Share of nurses who picked each reason.</p>
+        <div class="bn-chart" data-draw="bars" data-source="reasons" data-label="reason" data-fmt="count" data-filter="reasons" data-mode="has">—</div>
+      </section>
+      <section class="bn-card" id="concerns">
+        <h3>Biggest concerns</h3>
+        <p class="note">Share of nurses who picked each concern.</p>
+        <div class="bn-chart" data-draw="bars" data-source="concerns" data-label="concern" data-fmt="count" data-filter="concerns" data-mode="has">—</div>
+      </section>
+    </div>
+  </section>
+
+  <section class="bn-section" id="profile">
+    <h2>Profile</h2>
+    <p class="lede">Who is answering. Click a bar to list those candidates.</p>
+    <div class="bn-grid-3">
+      <section class="bn-card" id="qualification"><h3>Highest qualification</h3><p class="note">Share of all responses.</p>
+        <div class="bn-chart" data-draw="bars" data-source="by_qualification" data-label="qualification" data-fmt="count" data-filter="qualification">—</div></section>
+      <section class="bn-card" id="experience"><h3>Years of experience</h3><p class="note">Share of all responses.</p>
+        <div class="bn-chart" data-draw="bars" data-source="by_experience" data-label="experience" data-fmt="count" data-filter="experience">—</div></section>
+      <section class="bn-card" id="specialty"><h3>Clinical area</h3><p class="note">Share of all responses.</p>
+        <div class="bn-chart" data-draw="bars" data-source="by_specialty" data-label="specialty" data-fmt="count" data-filter="specialty">—</div></section>
+      <section class="bn-card" id="salary"><h3>Monthly take-home salary</h3><p class="note">Share of all responses.</p>
+        <div class="bn-chart" data-draw="bars" data-source="by_salary" data-label="salary" data-fmt="count" data-filter="salary">—</div></section>
+      <section class="bn-card" id="cities"><h3>Top cities</h3><p class="note">The 10 cities with the most responses, spellings merged.</p>
+        <div class="bn-chart" data-draw="bars" data-source="by_city" data-label="city" data-fmt="count" data-filter="city_norm">—</div></section>
+      <section class="bn-card" id="referrals"><h3>Referral codes</h3><p class="note">Responses per code. Not given means no code.</p>
+        <div class="bn-chart" data-draw="bars" data-source="by_referral" data-label="referral" data-fmt="count" data-filter="referral_label">—</div></section>
+    </div>
+  </section>
+</div>
+
+<script>
+  // The sheet's values as one row per response. Emails and phone numbers are not kept.
+  dash.loader('responses', {
+    description: 'Turns the Google Sheets values (first row = headers) into one row per form response, matching columns by their question; email and mobile columns are dropped.',
+    fn: ({ answer }) => {
+      let a = answer;
+      if (Array.isArray(a)) a = a.map((c) => (c && c.text) || '').join('');
+      if (a && typeof a === 'object' && Array.isArray(a.content)) a = a.content.map((c) => c.text || '').join('');
+      if (typeof a === 'string') { try { a = JSON.parse(a); } catch (e) { throw new Error(a.slice(0, 300)); } }
+      if (a && a.error) throw new Error(typeof a.error === 'string' ? a.error : JSON.stringify(a.error));
+      const values = a && Array.isArray(a.values) ? a.values : null;
+      if (!values) throw new Error('Google Sheets returned no values. Top-level keys: ' + Object.keys(a || {}).join(', '));
+      const head = (values[0] || []).map((h) => String(h).trim());
+      const col = (re) => head.findIndex((h) => re.test(h));
+      const ix = {
+        ts: col(/^Timestamp/i), name: col(/^Name$/i), age: col(/^Age$/i), city: col(/^City$/i), qual: col(/qualification/i), exp: col(/years of professional/i),
+        spec: col(/area of clinical/i), work: col(/currently working/i), sal: col(/salary/i), interest: col(/How interested/i),
+        thought: col(/ever thought/i), reasons: col(/biggest reasons/i), concerns: col(/biggest concerns/i), lang: col(/foreign language/i),
+        classes: col(/language classes/i), apply: col(/BridgeNurse offered/i), proof: col(/Upload a proof/i), ref: col(/Referral Code/i),
+      };
+      const get = (r, k) => (ix[k] >= 0 && r[ix[k]] != null ? String(r[ix[k]]).trim() : '');
+      const num = (s) => (s === '' || isNaN(Number(s)) ? null : Number(s));
+      const p = (n) => String(n).padStart(2, '0');
+      const rows = values.slice(1).filter((r) => r.some((c) => String(c).trim() !== '')).map((r, i) => {
+        const m = get(r, 'ts').match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})/);
+        const iso = m ? `${m[3]}-${p(m[1])}-${p(m[2])}T${p(m[4])}:${m[5]}:${m[6]}` : '';
+        return {
+          resp: i + 1, name: get(r, 'name'), submitted: iso, submitted_day: iso.slice(0, 10), age: num(get(r, 'age')), city: get(r, 'city'),
+          qualification: get(r, 'qual'), experience: get(r, 'exp'), specialty: get(r, 'spec'), workplace: get(r, 'work'),
+          salary: get(r, 'sal'), interest: num(get(r, 'interest')), thought_abroad: get(r, 'thought'), reasons: get(r, 'reasons'),
+          concerns: get(r, 'concerns'), language: get(r, 'lang'), class_likelihood: num(get(r, 'classes')),
+          apply_likelihood: num(get(r, 'apply')), proof_uploaded: get(r, 'proof') ? 'Yes' : 'No', referral: get(r, 'ref'),
+        };
+      });
+      return { columns: ['resp', 'name', 'submitted', 'submitted_day', 'age', 'city', 'qualification', 'experience', 'specialty', 'workplace', 'salary', 'interest', 'thought_abroad', 'reasons', 'concerns', 'language', 'class_likelihood', 'apply_likelihood', 'proof_uploaded', 'referral'], rows };
+    },
+  });
+
+  dash.calc('candidates', {
+    inputs: ['responses'], title: 'Candidates with intent score',
+    description: 'Intent score 0–100 = weighted average of: likely to apply 40%, interest abroad 25%, language willingness 15% (Yes definitely 5, If required 4, Maybe 2.5, No 1), class likelihood 10%, has thought of moving 10% (Yes 5, No 1); each 1–5 answer mapped to 0–100. High 75+, Medium 50–74, Low below 50.',
+    fn: (responses) => {
+      const lang = (s) => (/^Yes, definitely/i.test(s) ? 5 : /^Yes/i.test(s) ? 4 : /^Maybe/i.test(s) ? 2.5 : /^No/i.test(s) ? 1 : null);
+      const thought = (s) => (s === 'Yes' ? 5 : s === 'No' ? 1 : null);
+      const expOrder = ['Less than 1 year', '1–3 years', '3–5 years', '5–10 years', 'More than 10 years'];
+      const alias = { ghajiyabad: 'Ghaziabad', gaziyabad: 'Ghaziabad', vashali: 'Vaishali', gurgoan: 'Gurugram', gurgaon: 'Gurugram', ganganagar: 'Sri Ganganagar', 'sri ganganagar, rajasthan': 'Sri Ganganagar' };
+      return responses.map((r) => {
+        const parts = [[r.apply_likelihood, 0.4], [r.interest, 0.25], [lang(r.language || ''), 0.15], [r.class_likelihood, 0.1], [thought(r.thought_abroad), 0.1]]
+          .filter(([v]) => v != null && v !== '' && !isNaN(Number(v)));
+        const w = parts.reduce((s, [, k]) => s + k, 0);
+        const avg = w ? parts.reduce((s, [v, k]) => s + Number(v) * k, 0) / w : null;
+        const score = avg == null ? null : Math.round(((avg - 1) / 4) * 100);
+        const tier = score == null ? 'Low' : score >= 75 ? 'High' : score >= 50 ? 'Medium' : 'Low';
+        const rawCity = (r.city || '').trim().replace(/\s+/g, ' ');
+        const city_norm = rawCity ? alias[rawCity.toLowerCase()] || rawCity.toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase()) : 'Not given';
+        return { ...r, name: (r.name || '').trim(), score, tier, city_norm, referral_label: (r.referral || '').trim() || 'Not given', exp_rank: expOrder.indexOf(r.experience) };
+      });
+    },
+  });
+
+  dash.calc('kpis', {
+    inputs: ['candidates'], title: 'Headline figures',
+    description: 'Counts, average intent score and the share of candidates meeting each condition. Likely to apply = 4 or 5 out of 5.',
+    fn: (candidates) => {
+      const n = candidates.length;
+      const share = (f) => (n ? candidates.filter(f).length / n : null);
+      const scored = candidates.filter((r) => r.score != null);
+      return [{
+        responses: n,
+        avg_score: scored.length ? scored.reduce((s, r) => s + r.score, 0) / scored.length : null,
+        high_share: share((r) => r.tier === 'High'),
+        likely_apply_share: share((r) => Number(r.apply_likelihood) >= 4),
+        language_yes_share: share((r) => /^Yes/i.test(r.language || '')),
+        referral_share: share((r) => (r.referral || '').trim() !== ''),
+      }];
+    },
+  });
+
+  dash.calc('tiers', {
+    inputs: ['candidates'], title: 'Intent levels',
+    description: 'Candidates per intent level: High 75+, Medium 50–74, Low below 50.',
+    fn: (candidates) => {
+      const n = candidates.length || 1;
+      return [['High', '75–100', 75, 100], ['Medium', '50–74', 50, 74], ['Low', '0–49', 0, 49]].map(([tier, range, lo, hi]) => {
+        const k = candidates.filter((r) => r.tier === tier).length;
+        return { tier, range, lo, hi, n: k, share: k / n };
+      });
+    },
+  });
+
+  dash.calc('score_bins', {
+    inputs: ['candidates'], title: 'Intent score bands',
+    description: 'Candidates per 10-point band of the intent score; the last band includes 100.',
+    fn: (candidates) => Array.from({ length: 10 }, (_, i) => {
+      const lo = i * 10, hi = i === 9 ? 100 : lo + 9;
+      return { band: `${lo}–${hi}`, lo, n: candidates.filter((r) => r.score != null && r.score >= lo && r.score <= hi).length };
+    }),
+  });
+
+  dash.calc('components', {
+    inputs: ['candidates'], title: 'Intent questions',
+    description: 'Average answer to each question in the intent score, mapped from 1–5 to 0–100 (language and thought-of-moving mapped as in the score).',
+    fn: (candidates) => {
+      const lang = (s) => (/^Yes, definitely/i.test(s) ? 5 : /^Yes/i.test(s) ? 4 : /^Maybe/i.test(s) ? 2.5 : /^No/i.test(s) ? 1 : null);
+      const qs = [
+        ['Likely to apply', (r) => r.apply_likelihood],
+        ['Interest in working abroad', (r) => r.interest],
+        ['Will learn a language', (r) => lang(r.language || '')],
+        ['Would join language classes', (r) => r.class_likelihood],
+        ['Has thought of moving', (r) => (r.thought_abroad === 'Yes' ? 5 : r.thought_abroad === 'No' ? 1 : null)],
+      ];
+      return qs.map(([question, f]) => {
+        const v = candidates.map(f).filter((x) => x != null && x !== '' && !isNaN(Number(x))).map(Number);
+        return { question, avg: v.length ? ((v.reduce((s, x) => s + x, 0) / v.length - 1) / 4) * 100 : null, n: v.length };
+      });
+    },
+  });
+
+  const avgBy = (id, field, title, order) => dash.calc(id, {
+    inputs: ['candidates'], title, description: `Average intent score and candidate count per ${field}.`,
+    fn: (candidates) => {
+      const g = {};
+      candidates.filter((r) => r.score != null).forEach((r) => { const k = (r[field] || '').trim() || 'Not given'; (g[k] = g[k] || []).push(r.score); });
+      const rows = Object.entries(g).map(([group, s]) => ({ group, avg: s.reduce((a, b) => a + b, 0) / s.length, n: s.length }));
+      const rank = (k) => { const i = (order || []).indexOf(k); return i < 0 ? 999 : i; };
+      return order ? rows.sort((a, b) => rank(a.group) - rank(b.group)) : rows.sort((a, b) => b.avg - a.avg);
+    },
+  });
+  avgBy('intent_by_experience', 'experience', 'Intent by experience', ['Less than 1 year', '1–3 years', '3–5 years', '5–10 years', 'More than 10 years']);
+  avgBy('intent_by_qualification', 'qualification', 'Intent by qualification');
+  avgBy('intent_by_salary', 'salary', 'Intent by salary', ['Below ₹20,000', '₹20,000 – ₹30,000', '₹30,000 – ₹50,000', '₹50,000 – ₹75,000', 'Above ₹75,000', 'Prefer not to say']);
+
+  dash.calc('funnel', {
+    inputs: ['candidates'], title: 'Interest to application funnel',
+    description: 'Nurses passing each step and every step before it: interest 4+, has thought of moving, will learn a language, likely to apply 4+.',
+    fn: (candidates) => {
+      const steps = [
+        ['Answered the survey', () => true],
+        ['Interested in working abroad (4–5)', (r) => Number(r.interest) >= 4],
+        ['Has thought of moving abroad', (r) => r.thought_abroad === 'Yes'],
+        ['Will learn a language', (r) => /^Yes/i.test(r.language || '')],
+        ['Likely to apply in 12 months (4–5)', (r) => Number(r.apply_likelihood) >= 4],
+      ];
+      let left = candidates;
+      const total = candidates.length || 1;
+      return steps.map(([step, test]) => { left = left.filter(test); return { step, n: left.length, share: left.length / total }; });
+    },
+  });
+
+  dash.calc('per_day', {
+    inputs: ['candidates'], title: 'Responses per day',
+    description: 'Responses by submission date with zero days filled in, and the running total.',
+    fn: (candidates) => {
+      const days = candidates.map((r) => r.submitted_day).filter(Boolean).sort();
+      if (!days.length) return [];
+      const counts = {};
+      days.forEach((d) => { counts[d] = (counts[d] || 0) + 1; });
+      const out = [];
+      let cum = 0;
+      for (let t = Date.parse(days[0] + 'T00:00:00Z'); t <= Date.parse(days[days.length - 1] + 'T00:00:00Z'); t += 86400000) {
+        const day = new Date(t).toISOString().slice(0, 10);
+        cum += counts[day] || 0;
+        out.push({ day, n: counts[day] || 0, cumulative: cum });
+      }
+      return out;
+    },
+  });
+
+  const multiCalc = (id, field, key, title) => dash.calc(id, {
+    inputs: ['candidates'], title, description: `Each ${key} picked, counted once per nurse, as a share of all responses.`,
+    fn: (candidates) => {
+      const counts = {};
+      candidates.forEach((r) => (r[field] || '').split(/,\s+/).map((s) => s.trim()).filter(Boolean).forEach((s) => { counts[s] = (counts[s] || 0) + 1; }));
+      const total = candidates.length || 1;
+      return Object.entries(counts).map(([k, n]) => ({ [key]: k, n, share: n / total })).sort((a, b) => b.n - a.n);
+    },
+  });
+  multiCalc('reasons', 'reasons', 'reason', 'Reasons to work abroad');
+  multiCalc('concerns', 'concerns', 'concern', 'Concerns about moving');
+
+  const countCalc = (id, field, key, title, order, top) => dash.calc(id, {
+    inputs: ['candidates'], title, description: `Count and share of responses per ${key}${top ? `, top ${top}` : ''}.`,
+    fn: (candidates) => {
+      const counts = {};
+      candidates.forEach((r) => { const k = (r[field] || '').trim() || 'Not given'; counts[k] = (counts[k] || 0) + 1; });
+      const total = candidates.length || 1;
+      const rank = (k) => { const i = (order || []).indexOf(k); return i < 0 ? 999 : i; };
+      const rows = Object.entries(counts).map(([k, n]) => ({ [key]: k, n, share: n / total }))
+        .sort((a, b) => (order ? rank(a[key]) - rank(b[key]) : 0) || b.n - a.n);
+      return top ? rows.slice(0, top) : rows;
+    },
+  });
+  countCalc('by_qualification', 'qualification', 'qualification', 'Responses by qualification');
+  countCalc('by_experience', 'experience', 'experience', 'Responses by experience', ['Less than 1 year', '1–3 years', '3–5 years', '5–10 years', 'More than 10 years']);
+  countCalc('by_specialty', 'specialty', 'specialty', 'Responses by clinical area');
+  countCalc('by_salary', 'salary', 'salary', 'Responses by salary', ['Below ₹20,000', '₹20,000 – ₹30,000', '₹30,000 – ₹50,000', '₹50,000 – ₹75,000', 'Above ₹75,000', 'Prefer not to say']);
+  countCalc('by_city', 'city_norm', 'city', 'Top 10 cities', null, 10);
+  countCalc('by_referral', 'referral_label', 'referral', 'Responses by referral code');
+
+  // ---- shared helpers ----
+  const fmt = { int: d3.format(','), pct: d3.format('.0%'), score: (v) => d3.format('.0f')(v) };
+  const tierColor = (t) => `var(--color-${t === 'High' ? 'ok' : t === 'Medium' ? 'warn' : 'bad'})`;
+  const filterLabels = { experience: 'Experience', qualification: 'Qualification', salary: 'Salary', specialty: 'Clinical area', city_norm: 'City', referral_label: 'Referral code', reasons: 'Reason', concerns: 'Concern' };
+  const setFilter = (field, value, mode) => {
+    const p = dash.params();
+    if (p.ff === field && p.fv === value) dash.setParams({ ff: null, fv: null, fm: null });
+    else dash.setParams({ ff: field, fv: value, fm: mode || 'eq' });
+    document.querySelectorAll('#candidates').forEach((c) => c.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  };
+  const tipFor = (el) => {
+    const tip = d3.select(el).append('div').attr('class', 'bn-tip').style('display', 'none');
+    return {
+      show(ev, lines) {
+        tip.style('display', null).html('');
+        lines.forEach((l, i) => tip.append('div').attr('class', i === 0 ? 'd' : null).text(l));
+        const [px, py] = d3.pointer(ev, el);
+        const tw = tip.node().offsetWidth, th = tip.node().offsetHeight;
+        tip.style('left', `${Math.min(Math.max(0, px + 12), el.clientWidth - tw)}px`).style('top', `${Math.max(0, py - th - 8)}px`);
+      },
+      hide() { tip.style('display', 'none'); },
+    };
+  };
+
+  document.querySelectorAll('.bn-tierbtn').forEach((b) => b.addEventListener('click', () => dash.setParams({ tier: b.dataset.tier || null })));
+  document.querySelectorAll('.bn-clear').forEach((b) => b.addEventListener('click', () => dash.setParams({ ff: null, fv: null, fm: null, tier: null })));
+  document.querySelectorAll('.bn-search').forEach((s) => s.addEventListener('input', () => dash.draw('table')));
+  document.querySelectorAll('.bn-sort').forEach((th) => th.addEventListener('click', () => {
+    const p = dash.params(), k = th.dataset.sort;
+    dash.setParams({ sort: k, dir: p.sort === k && p.dir !== 'asc' ? 'asc' : 'desc' });
+  }));
+  dash.onData(() => {
+    const st = dash.data('responses').status;
+    document.querySelectorAll('#data-access').forEach((a) => { a.hidden = !['connect', 'declined', 'error'].includes(st); });
+    const p = dash.params();
+    document.querySelectorAll('.bn-detail-hint').forEach((h) => { h.hidden = !!(p.pick && st === 'ok'); });
+    document.querySelectorAll('.bn-tierbtn').forEach((b) => b.setAttribute('aria-pressed', String((p.tier || '') === b.dataset.tier)));
+    document.querySelectorAll('.bn-clear').forEach((b) => { b.hidden = !p.ff; });
+    const sort = p.sort || 'score', dir = p.dir || 'desc';
+    document.querySelectorAll('.bn-sort').forEach((th) => {
+      if (th.dataset.sort === sort && th.dataset.field !== 'tier') th.setAttribute('aria-sort', dir === 'asc' ? 'ascending' : 'descending');
+      else th.removeAttribute('aria-sort');
+    });
+  });
+
+  dash.draw('kpi', (el) => {
+    const d = dash.data(el.dataset.source);
+    const v = d.status === 'ok' && d.data[0] ? d.data[0][el.dataset.field] : null;
+    el.textContent = v == null ? '—' : fmt[el.dataset.fmt](v);
+  });
+
+  dash.draw('filterlabel', (el) => {
+    const p = dash.params();
+    el.textContent = p.ff ? `${filterLabels[p.ff] || p.ff}: ${p.fv}` : '—';
+  });
+
+  // Horizontal bars. data-value picks the column (default n); data-filter makes bars list candidates on click.
+  dash.draw('bars', (el) => {
+    const d = dash.data(el.dataset.source);
+    el.replaceChildren();
+    if (d.status !== 'ok' || !d.data.length) { el.textContent = '—'; return; }
+    const rows = d.data.filter((r) => r[el.dataset.value || 'n'] != null), key = el.dataset.label, vk = el.dataset.value || 'n';
+    const mode = el.dataset.fmt, ff = el.dataset.filter, p = dash.params();
+    const active = ff && p.ff === ff ? p.fv : null;
+    const label = (r) => (mode === 'count' ? `${fmt.int(r.n)} · ${fmt.pct(r.share)}` : mode === 'avgn' ? `${fmt.score(r[vk])} · ${fmt.int(r.n)} people` : fmt.score(r[vk]));
+    const W = Math.max(260, el.clientWidth || 360), rowH = 30;
+    const svg = d3.select(el).append('svg').attr('width', '100%').attr('viewBox', `0 0 ${W} ${rows.length * rowH + 4}`);
+    const probe = svg.append('text').attr('class', 'lab');
+    const maxLab = Math.min(W * 0.46, d3.max(rows, (r) => { probe.text(r[key]); return probe.node().getComputedTextLength(); }) + 12);
+    probe.attr('class', null);
+    const valW = d3.max(rows, (r) => { probe.text(label(r)); return probe.node().getComputedTextLength(); }) + 12;
+    probe.remove();
+    const max = el.dataset.max ? Number(el.dataset.max) : d3.max(rows, (r) => r[vk]) || 1;
+    const x = d3.scaleLinear([0, max], [0, Math.max(10, W - maxLab - valW)]);
+    const tip = tipFor(el);
+    const g = svg.selectAll('g').data(rows).join('g').attr('transform', (r, i) => `translate(0,${i * rowH})`)
+      .attr('class', ff ? 'hit' : null).attr('tabindex', ff ? 0 : null).attr('role', ff ? 'button' : null)
+      .attr('aria-label', (r) => `${r[key]}: ${label(r)}`);
+    g.append('rect').attr('x', 0).attr('y', 0).attr('width', W).attr('height', rowH).attr('fill', 'transparent');
+    g.append('text').attr('class', 'lab').attr('x', maxLab - 12).attr('y', rowH / 2).attr('dy', '0.35em').attr('text-anchor', 'end')
+      .text((r) => String(r[key]))
+      .each(function () { const room = maxLab - 14; let t = this.textContent; while (t.length > 4 && this.getComputedTextLength() > room) { t = t.slice(0, -2); this.textContent = t.trimEnd() + '…'; } });
+    if (el.dataset.max) g.append('rect').attr('x', maxLab).attr('y', 7).attr('height', rowH - 14).attr('rx', 3).attr('width', x(max)).attr('fill', 'var(--cds-chart-grid)');
+    g.append('rect').attr('class', 'bn-grow').attr('x', maxLab).attr('y', 7).attr('height', rowH - 14).attr('rx', 3)
+      .attr('width', (r) => Math.max(1, x(r[vk])))
+      .attr('fill', (r) => (active != null && r[key] !== active ? 'var(--cds-chart-muted)' : el.dataset.max && vk === 'avg' && mode !== 'score' ? tierColor(r[vk] >= 75 ? 'High' : r[vk] >= 50 ? 'Medium' : 'Low') : dash.colors[0]));
+    g.append('text').attr('x', (r) => maxLab + (el.dataset.max ? x(max) : Math.max(1, x(r[vk]))) + 6).attr('y', rowH / 2).attr('dy', '0.35em').text(label);
+    g.on('pointerenter pointermove', (ev, r) => tip.show(ev, [r[key], label(r), ff ? 'Click to list these candidates' : ''].filter(Boolean)))
+      .on('pointerleave', () => tip.hide());
+    if (ff) g.on('click', (ev, r) => setFilter(ff, r[key], el.dataset.mode)).on('keydown', (ev, r) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); setFilter(ff, r[key], el.dataset.mode); } });
+  });
+
+  dash.draw('donut', (el) => {
+    const t = dash.data('tiers'), k = dash.data('kpis');
+    el.replaceChildren();
+    if (t.status !== 'ok' || !t.data.length) return;
+    const W = Math.max(240, el.clientWidth || 300), H = 240, R = Math.min(W, H) / 2 - 8;
+    const svg = d3.select(el).append('svg').attr('width', '100%').attr('viewBox', `0 0 ${W} ${H}`);
+    const gg = svg.append('g').attr('transform', `translate(${W / 2},${H / 2})`);
+    const pie = d3.pie().value((r) => r.n).sort(null).padAngle(0.02);
+    const arc = d3.arc().innerRadius(R * 0.62).outerRadius(R).cornerRadius(4);
+    const arcHover = d3.arc().innerRadius(R * 0.62).outerRadius(R + 6).cornerRadius(4);
+    const tip = tipFor(el), sel = dash.params().tier;
+    gg.selectAll('path').data(pie(t.data.filter((r) => r.n > 0))).join('path')
+      .attr('d', arc).attr('fill', (a) => tierColor(a.data.tier)).attr('opacity', (a) => (sel && sel !== a.data.tier ? 0.3 : 1))
+      .attr('class', 'hit').attr('tabindex', 0).attr('role', 'button').attr('aria-label', (a) => `${a.data.tier} intent: ${a.data.n}`)
+      .on('pointerenter pointermove', function (ev, a) { d3.select(this).attr('d', arcHover); tip.show(ev, [`${a.data.tier} intent (${a.data.range})`, `${fmt.int(a.data.n)} candidates · ${fmt.pct(a.data.share)}`, 'Click to list them']); })
+      .on('pointerleave', function () { d3.select(this).attr('d', arc); tip.hide(); })
+      .on('click', (ev, a) => { dash.setParams({ tier: sel === a.data.tier ? null : a.data.tier }); document.querySelectorAll('#candidates').forEach((c) => c.scrollIntoView({ behavior: 'smooth' })); });
+    const high = t.data.find((r) => r.tier === 'High');
+    gg.append('text').attr('class', 'big').attr('text-anchor', 'middle').attr('dy', '0.1em').style('font-size', `${Math.round(R * 0.36)}px`).text(high ? fmt.pct(high.share) : '');
+    gg.append('text').attr('text-anchor', 'middle').attr('dy', `${R * 0.3}px`).text('high intent');
+  });
+
+  dash.draw('tierlegend', (el) => {
+    const t = dash.data('tiers');
+    el.replaceChildren();
+    if (t.status !== 'ok') return;
+    const sel = dash.params().tier;
+    t.data.forEach((r) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.setAttribute('aria-pressed', String(sel === r.tier));
+      const i = document.createElement('i'); i.style.background = tierColor(r.tier);
+      b.append(i, `${r.tier} (${r.range}): ${fmt.int(r.n)} · ${fmt.pct(r.share)}`);
+      b.addEventListener('click', () => dash.setParams({ tier: sel === r.tier ? null : r.tier }));
+      el.appendChild(b);
+    });
+  });
+
+  dash.draw('gauge', (el) => {
+    const k = dash.data('kpis'), t = dash.data('tiers');
+    el.replaceChildren();
+    if (k.status !== 'ok' || t.status !== 'ok' || !k.data[0] || k.data[0].avg_score == null) return;
+    const v = k.data[0].avg_score;
+    const W = Math.max(240, el.clientWidth || 300), H = 220, R = Math.min(W / 2 - 16, H - 50);
+    const svg = d3.select(el).append('svg').attr('width', '100%').attr('viewBox', `0 0 ${W} ${H}`);
+    const g = svg.append('g').attr('transform', `translate(${W / 2},${R + 16})`);
+    const a = d3.scaleLinear([0, 100], [-Math.PI / 2, Math.PI / 2]);
+    const band = d3.arc().innerRadius(R * 0.78).outerRadius(R);
+    t.data.forEach((r) => g.append('path').attr('d', band({ startAngle: a(r.lo), endAngle: a(Math.min(100, r.hi + 1)) })).attr('fill', tierColor(r.tier)).attr('opacity', 0.28));
+    g.append('path').attr('d', band({ startAngle: a(0), endAngle: a(v) })).attr('fill', tierColor(v >= 75 ? 'High' : v >= 50 ? 'Medium' : 'Low'));
+    const ang = a(v);
+    g.append('line').attr('x1', 0).attr('y1', 0).attr('x2', Math.sin(ang) * R * 0.7).attr('y2', -Math.cos(ang) * R * 0.7)
+      .attr('stroke', 'var(--color-fg)').attr('stroke-width', 3).attr('stroke-linecap', 'round');
+    g.append('circle').attr('r', 6).attr('fill', 'var(--color-fg)');
+    [0, 50, 75, 100].forEach((tk) => g.append('text').attr('x', Math.sin(a(tk)) * (R + 10)).attr('y', -Math.cos(a(tk)) * (R + 10)).attr('text-anchor', tk === 0 ? 'end' : tk === 100 ? 'start' : 'middle').attr('dy', tk === 0 || tk === 100 ? '0.35em' : 0).text(tk));
+    g.append('text').attr('class', 'big').attr('text-anchor', 'middle').attr('y', 34).style('font-size', '30px').text(fmt.score(v));
+    g.append('text').attr('text-anchor', 'middle').attr('y', 52).text('average intent score');
+  });
+
+  dash.draw('hist', (el) => {
+    const d = dash.data('score_bins');
+    el.replaceChildren();
+    if (d.status !== 'ok' || !d.data.length) return;
+    const W = Math.max(260, el.clientWidth || 360), H = 200, m = { t: 14, r: 6, b: 22, l: 26 };
+    const svg = d3.select(el).append('svg').attr('width', '100%').attr('viewBox', `0 0 ${W} ${H}`);
+    const x = d3.scaleBand(d.data.map((r) => r.band), [m.l, W - m.r]).padding(0.15);
+    const y = d3.scaleLinear([0, d3.max(d.data, (r) => r.n) || 1], [H - m.b, m.t]).nice();
+    svg.append('g').selectAll('line').data(y.ticks(4)).join('line').attr('x1', m.l).attr('x2', W - m.r).attr('y1', (v) => y(v)).attr('y2', (v) => y(v)).attr('stroke', 'var(--cds-chart-grid)');
+    svg.append('g').selectAll('text').data(y.ticks(4).filter(Number.isInteger)).join('text').attr('x', m.l - 6).attr('y', (v) => y(v)).attr('dy', '0.35em').attr('text-anchor', 'end').text((v) => v);
+    const every = W < 420 ? 2 : 1;
+    svg.append('g').selectAll('text').data(d.data.filter((r, i) => i % every === 0)).join('text').attr('x', (r) => x(r.band) + x.bandwidth() / 2).attr('y', H - 6).attr('text-anchor', 'middle').text((r) => r.lo);
+    const tip = tipFor(el);
+    svg.append('g').selectAll('rect').data(d.data).join('rect')
+      .attr('x', (r) => x(r.band)).attr('width', x.bandwidth()).attr('y', (r) => y(r.n)).attr('height', (r) => y(0) - y(r.n)).attr('rx', 3)
+      .attr('fill', dash.colors[0])
+      .on('pointerenter pointermove', (ev, r) => tip.show(ev, [`Score ${r.band}`, `${fmt.int(r.n)} candidates`]))
+      .on('pointerleave', () => tip.hide());
+    svg.append('g').selectAll('text').data(d.data.filter((r) => r.n > 0)).join('text').attr('class', 'lab').attr('x', (r) => x(r.band) + x.bandwidth() / 2).attr('y', (r) => y(r.n) - 4).attr('text-anchor', 'middle').text((r) => r.n);
+  });
+
+  dash.draw('daily', (el) => {
+    const d = dash.data('per_day');
+    el.replaceChildren();
+    if (d.status !== 'ok' || !d.data.length) return;
+    const rows = d.data.map((r) => ({ ...r, date: new Date(r.day + 'T00:00:00Z') }));
+    const W = Math.max(260, el.clientWidth || 360), H = 210, m = { t: 12, r: 34, b: 24, l: 26 };
+    const svg = d3.select(el).append('svg').attr('width', '100%').attr('viewBox', `0 0 ${W} ${H}`);
+    const x = d3.scaleBand(rows.map((r) => r.day), [m.l, W - m.r]).padding(0.2);
+    const y = d3.scaleLinear([0, d3.max(rows, (r) => r.n) || 1], [H - m.b, m.t]).nice();
+    const y2 = d3.scaleLinear([0, d3.max(rows, (r) => r.cumulative) || 1], [H - m.b, m.t]).nice();
+    svg.append('g').selectAll('line').data(y.ticks(4)).join('line').attr('x1', m.l).attr('x2', W - m.r).attr('y1', (v) => y(v)).attr('y2', (v) => y(v)).attr('stroke', 'var(--cds-chart-grid)');
+    svg.append('g').selectAll('text').data(y.ticks(4).filter(Number.isInteger)).join('text').attr('x', m.l - 6).attr('y', (v) => y(v)).attr('dy', '0.35em').attr('text-anchor', 'end').text((v) => v);
+    svg.append('g').selectAll('text').data(y2.ticks(4).filter(Number.isInteger)).join('text').attr('x', W - m.r + 6).attr('y', (v) => y2(v)).attr('dy', '0.35em').text((v) => v);
+    const every = Math.ceil(rows.length / Math.max(2, Math.floor((W - m.l - m.r) / 56)));
+    svg.append('g').selectAll('text').data(rows.filter((r, i) => i % every === 0)).join('text').attr('x', (r) => x(r.day) + x.bandwidth() / 2).attr('y', H - 6).attr('text-anchor', 'middle').text((r) => d3.utcFormat('%b %-d')(r.date));
+    svg.append('g').selectAll('rect').data(rows).join('rect').attr('x', (r) => x(r.day)).attr('width', x.bandwidth()).attr('y', (r) => y(r.n)).attr('height', (r) => y(0) - y(r.n)).attr('rx', Math.min(3, x.bandwidth() / 2)).attr('fill', dash.colors[0]);
+    svg.append('path').datum(rows).attr('fill', 'none').attr('stroke', dash.colors[1]).attr('stroke-width', 2).attr('stroke-linejoin', 'round').attr('stroke-linecap', 'round')
+      .attr('d', d3.line().x((r) => x(r.day) + x.bandwidth() / 2).y((r) => y2(r.cumulative)));
+    const last = rows[rows.length - 1];
+    svg.append('circle').attr('cx', x(last.day) + x.bandwidth() / 2).attr('cy', y2(last.cumulative)).attr('r', 4).attr('fill', dash.colors[1]);
+    const tip = tipFor(el);
+    const dot = svg.append('circle').attr('r', 4).attr('fill', dash.colors[1]).style('display', 'none');
+    svg.append('g').selectAll('rect').data(rows).join('rect').attr('x', (r) => x(r.day) - (x.step() - x.bandwidth()) / 2).attr('width', x.step()).attr('y', m.t).attr('height', H - m.t - m.b).attr('fill', 'transparent')
+      .on('pointerenter pointermove', (ev, r) => { dot.style('display', null).attr('cx', x(r.day) + x.bandwidth() / 2).attr('cy', y2(r.cumulative)); tip.show(ev, [d3.utcFormat('%a, %b %-d')(r.date), `${fmt.int(r.n)} responses that day`, `${fmt.int(r.cumulative)} in total`]); })
+      .on('pointerleave', () => { dot.style('display', 'none'); tip.hide(); });
+  });
+
+  const visible = () => {
+    const d = dash.data('candidates');
+    if (d.status !== 'ok') return [];
+    const p = dash.params();
+    const q = [...document.querySelectorAll('.bn-search')].map((s) => s.value.trim().toLowerCase()).join(' ').trim();
+    const sort = p.sort || 'score', dir = p.dir === 'asc' ? 1 : -1;
+    return d.data
+      .filter((r) => !p.tier || r.tier === p.tier)
+      .filter((r) => !p.ff || (p.fm === 'has' ? (r[p.ff] || '').split(/,\s+/).map((s) => s.trim()).includes(p.fv) : String((r[p.ff] || '').trim() || 'Not given') === p.fv))
+      .filter((r) => !q || [r.name, r.city, r.workplace, r.specialty, r.qualification, r.referral].join(' ').toLowerCase().includes(q))
+      .sort((a, b) => {
+        const va = a[sort], vb = b[sort];
+        const c = typeof va === 'number' || typeof vb === 'number' ? (va ?? -1) - (vb ?? -1) : String(va || '').localeCompare(String(vb || ''));
+        return c * dir || a.resp - b.resp;
+      });
+  };
+
+  dash.draw('table', (tbody) => {
+    tbody.replaceChildren();
+    const pick = Number(dash.params().pick);
+    visible().forEach((r) => {
+      const tr = document.createElement('tr');
+      tr.dataset.key = String(r.resp);
+      if (r.resp === pick) tr.className = 'on';
+      const td = (text, cls) => { const c = document.createElement('td'); if (text != null) c.textContent = text; if (cls) c.className = cls; tr.appendChild(c); return c; };
+      td(String(r.resp), 'num');
+      td(r.name, 'name');
+      const sc = td(null);
+      const wrap = document.createElement('div'); wrap.className = 'bn-scorecell';
+      const bar = document.createElement('div'); bar.className = 'bn-scorebar';
+      const fill = document.createElement('span'); fill.style.width = `${r.score ?? 0}%`; fill.style.background = tierColor(r.tier);
+      bar.appendChild(fill);
+      const num = document.createElement('span'); num.textContent = r.score == null ? '' : String(r.score);
+      wrap.append(num, bar); sc.appendChild(wrap);
+      const tc = td(null); const pill = document.createElement('span'); pill.className = `bn-pill ${r.tier}`; pill.textContent = r.tier; tc.appendChild(pill);
+      td(r.submitted_day, 'hide-narrow');
+      td(r.city);
+      td(r.qualification, 'hide-narrow');
+      td(r.experience, 'hide-narrow');
+      td(r.specialty, 'hide-narrow');
+      td(r.apply_likelihood == null ? '' : String(r.apply_likelihood), 'num');
+      td(r.referral, 'hide-narrow');
+      tr.addEventListener('click', () => {
+        dash.setParams({ pick: String(r.resp) });
+        document.querySelectorAll('#candidate-detail').forEach((c) => c.scrollIntoView({ behavior: 'smooth', block: 'nearest' }));
+      });
+      tbody.appendChild(tr);
+    });
+  });
+
+  dash.draw('detail', (el) => {
+    const d = dash.data('candidates');
+    el.replaceChildren();
+    const pick = Number(dash.params().pick);
+    const r = d.status === 'ok' ? d.data.find((x) => x.resp === pick) : null;
+    if (!r) { el.textContent = '—'; return; }
+    const box = document.createElement('div'); box.className = 'bn-detail';
+    const left = document.createElement('div');
+    const h = document.createElement('h4'); h.textContent = r.name || `Response ${r.resp}`;
+    const pill = document.createElement('span'); pill.className = `bn-pill ${r.tier}`; pill.textContent = `${r.tier} intent · ${r.score ?? ''}`;
+    const dl = document.createElement('dl');
+    const row = (k, v) => { if (v == null || v === '') return; const dt = document.createElement('dt'); dt.textContent = k; const dd = document.createElement('dd'); if (v instanceof Node) dd.appendChild(v); else dd.textContent = v; dl.append(dt, dd); };
+    const dots = (v) => { const s = document.createElement('span'); s.className = 'bn-dots'; for (let i = 1; i <= 5; i++) { const b = document.createElement('i'); if (i <= Number(v)) b.style.background = tierColor(r.tier); s.appendChild(b); } s.append(` ${v} / 5`); return s; };
+    row('Submitted', r.submitted.replace('T', ' '));
+    row('Age', r.age == null ? '' : String(r.age));
+    row('City', r.city);
+    row('Workplace', r.workplace);
+    row('Qualification', r.qualification);
+    row('Experience', r.experience);
+    row('Clinical area', r.specialty);
+    row('Salary', r.salary);
+    row('Referral code', r.referral);
+    row('Proof uploaded', r.proof_uploaded);
+    left.append(h, pill, document.createElement('br'), document.createElement('br'), dl);
+    const right = document.createElement('div');
+    const dl2 = document.createElement('dl');
+    const add = (k, v) => { const dt = document.createElement('dt'); dt.textContent = k; const dd = document.createElement('dd'); if (v instanceof Node) dd.appendChild(v); else dd.textContent = v || '—'; dl2.append(dt, dd); };
+    if (r.apply_likelihood != null) add('Likely to apply', dots(r.apply_likelihood));
+    if (r.interest != null) add('Interest abroad', dots(r.interest));
+    if (r.class_likelihood != null) add('Join classes', dots(r.class_likelihood));
+    add('Learn a language', r.language);
+    add('Thought of moving', r.thought_abroad);
+    const tags = (s) => { const w = document.createElement('div'); w.className = 'bn-tags'; (s || '').split(/,\s+/).filter(Boolean).forEach((t) => { const sp = document.createElement('span'); sp.textContent = t; w.appendChild(sp); }); return w; };
+    add('Reasons', tags(r.reasons));
+    add('Concerns', tags(r.concerns));
+    right.appendChild(dl2);
+    box.append(left, right);
+    el.appendChild(box);
+  });
+</script>
+
+</div>
+<script>window.__hostStart();</script>
+</body>
+</html>
